@@ -1,7 +1,8 @@
 {
   "service": {
     "name": "Alertes épisodes",
-    "environment": "development"
+    "environment": "development",
+    "base_url": "http://127.0.0.1:8000"
   },
   "server": {
     "host": "127.0.0.1",
@@ -15,6 +16,7 @@
     "level": "INFO"
   },
   "email": {
+    "provider": "smtp",
     "smtp_host": "smtp.example.org",
     "smtp_port": 587,
     "username": "alertes@example.org",
@@ -22,6 +24,7 @@
     "sender": "alertes@example.org",
     "recipient": "operateur@example.org",
     "use_starttls": true,
-    "timeout_seconds": 10.0
+    "timeout_seconds": 10.0,
+    "outbox_path": ""
   }
 }

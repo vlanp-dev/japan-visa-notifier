@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from html import escape as _escape
 from typing import Any, Iterable
+from urllib.parse import quote
 
 from . import __version__
 from .config import Config
@@ -32,6 +33,9 @@ body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0
        background: #f6f7f9; color: #1c2430; }}
 header {{ background: #12263f; color: #fff; padding: 1rem 1.5rem; }}
 header h1 {{ margin: 0; font-size: 1.25rem; }}
+header nav {{ margin-top: .5rem; display: flex; gap: 1rem; flex-wrap: wrap; }}
+header nav a {{ color: #cfe0f5; font-size: .9rem; }}
+header nav a:hover {{ color: #fff; }}
 main {{ max-width: 1100px; margin: 0 auto; padding: 1.5rem; }}
 .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
           gap: 1rem; margin-bottom: 1.5rem; }}
@@ -62,7 +66,13 @@ footer {{ max-width: 1100px; margin: 0 auto; padding: 0 1.5rem 2rem;
 </style>
 </head>
 <body>
-<header><h1>{escape(service_name)}</h1></header>
+<header><h1>{escape(service_name)}</h1>
+<nav>
+  <a href="/">Tableau de bord</a>
+  <a href="/episodes/new">Nouvel épisode</a>
+  <a href="/deliveries">Journal des livraisons</a>
+</nav>
+</header>
 <main>
 {body}
 </main>
@@ -85,8 +95,12 @@ def health_page(
     status_class = "" if database_ok else " bad"
     database_text = "Accessible" if database_ok else "Indisponible"
     database_class = "ok" if database_ok else "bad"
-    email_text = "Configuré" if config.email_configured else "Non configuré"
-    email_class = "ok" if config.email_configured else ""
+    if config.email_configured:
+        email_text = f"Configuré ({config.email.provider})"
+        email_class = "ok"
+    else:
+        email_text = "Non configuré"
+        email_class = "bad"
 
     episode_rows = list(episodes)
     attempt_rows = list(attempts)
@@ -133,11 +147,12 @@ def _episode_table(episodes: Iterable[Episode]) -> str:
             f"<td><code>{escape(episode.page_url)}</code></td>"
             f"<td>{escape(episode.detected_at)}</td>"
             f"<td>{escape(acknowledged)}</td>"
+            f'<td><a href="/episodes/{escape(quote(episode.id, safe=""))}">Détail</a></td>'
             "</tr>"
         )
     return (
         "<table><thead><tr><th>Nature du changement</th><th>Page</th>"
-        "<th>Détecté le</th><th>Acquittement</th></tr></thead>"
+        "<th>Détecté le</th><th>Acquittement</th><th>Détail</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 
@@ -170,6 +185,159 @@ def _attempt_table(attempts: Iterable[DeliveryAttempt]) -> str:
         "<th>Segments</th><th>Erreur</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
+
+
+def new_episode_page(
+    *,
+    config: Config,
+    csrf_token: str,
+    error: str = "",
+    values: dict[str, str] | None = None,
+) -> str:
+    values = values or {}
+    error_banner = (
+        f'<div class="banner bad"><strong>{escape(error)}</strong></div>'
+        if error
+        else ""
+    )
+    body = f"""
+{error_banner}
+<section>
+  <h2>Créer un épisode</h2>
+  <p>La création enregistre l'épisode puis tente immédiatement l'envoi de
+     l'alerte email obligatoire.</p>
+  <form method="post" action="/episodes">
+    <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+    <p><label>Nature du changement<br>
+      <input name="change_nature" required maxlength="200" size="60"
+             value="{escape(values.get('change_nature', ''))}"></label></p>
+    <p><label>Page concernée (URL absolue)<br>
+      <input name="page_url" type="url" required maxlength="2048" size="60"
+             value="{escape(values.get('page_url', ''))}"></label></p>
+    <p><label>Résumé (facultatif)<br>
+      <textarea name="summary" maxlength="2000" rows="4" cols="60">{escape(values.get('summary', ''))}</textarea></label></p>
+    <p><button type="submit">Créer et envoyer l'alerte email</button></p>
+  </form>
+</section>
+"""
+    return layout(
+        title="Nouvel épisode", body=body, service_name=config.service_name
+    )
+
+
+def episode_page(
+    *,
+    config: Config,
+    episode: Episode,
+    attempts: Iterable[DeliveryAttempt],
+    csrf_token: str,
+    notice: str = "",
+) -> str:
+    attempt_rows = list(attempts)
+    if attempt_rows:
+        attempt_table = _attempt_table(attempt_rows)
+    else:
+        attempt_table = '<p class="empty">Aucune tentative de livraison.</p>'
+
+    acknowledged = episode.acknowledged_at
+    if acknowledged:
+        acknowledgement = (
+            f'<p class="ok">Acquitté le {escape(acknowledged)}.</p>'
+        )
+    else:
+        acknowledgement = f"""
+<form method="post" action="/episodes/{escape(quote(episode.id, safe=''))}/acknowledge" id="acquitter">
+  <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+  <button type="submit">Acquitter l'épisode</button>
+</form>
+"""
+
+    if config.email_configured:
+        email_text = f"Configuré ({config.email.provider})"
+        email_class = "ok"
+    else:
+        email_text = "Non configuré"
+        email_class = "bad"
+
+    notice_banner = ""
+    notice_data = _NOTICES.get(notice)
+    if notice_data:
+        text, css_class = notice_data
+        notice_banner = (
+            f'<div class="banner{css_class}"><strong>{escape(text)}</strong></div>'
+        )
+
+    summary = (
+        f"<p><strong>Résumé :</strong> {escape(episode.summary)}</p>"
+        if episode.summary
+        else ""
+    )
+
+    body = f"""
+{notice_banner}
+<section>
+  <h2>Épisode</h2>
+  <p><a href="/">Retour au tableau de bord</a></p>
+  <p><strong>Nature du changement :</strong> {escape(episode.change_nature)}</p>
+  <p><strong>Page :</strong> <code>{escape(episode.page_url)}</code></p>
+  <p><strong>Détecté le :</strong> {escape(episode.detected_at)}</p>
+  {summary}
+  <p><strong>Canal email :</strong> <span class="{escape(email_class)}">{escape(email_text)}</span></p>
+  <p><strong>Acquittement :</strong></p>
+  {acknowledgement}
+</section>
+<section>
+  <h2>Réémission</h2>
+  <p>La réémission utilise uniquement le canal email.</p>
+  <form method="post" action="/episodes/{escape(quote(episode.id, safe=''))}/resend">
+    <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+    <button type="submit">Réémettre l'email</button>
+  </form>
+</section>
+<section>
+  <h2>Tentatives de livraison de cet épisode</h2>
+  {attempt_table}
+</section>
+"""
+    return layout(
+        title=f"Épisode — {episode.change_nature}",
+        body=body,
+        service_name=config.service_name,
+    )
+
+
+def deliveries_page(
+    *, config: Config, attempts: Iterable[DeliveryAttempt]
+) -> str:
+    attempt_rows = list(attempts)
+    if attempt_rows:
+        attempt_table = _attempt_table(attempt_rows)
+    else:
+        attempt_table = '<p class="empty">Aucune tentative de livraison enregistrée.</p>'
+    body = f"""
+<section>
+  <h2>Journal des livraisons</h2>
+  <p>Les destinataires sont masqués et les erreurs sont expurgées.</p>
+  {attempt_table}
+</section>
+"""
+    return layout(
+        title="Journal des livraisons",
+        body=body,
+        service_name=config.service_name,
+    )
+
+
+_NOTICES: dict[str, tuple[str, str]] = {
+    "created": ("Épisode créé. L'alerte email a été traitée.", ""),
+    "acknowledged": ("Épisode acquitté.", ""),
+    "resent_sent": ("Email réémis avec succès.", ""),
+    "resent_failed": (
+        "La réémission email a échoué ; l'épisode reste consultable et "
+        "peut être réémis à nouveau.",
+        " bad",
+    ),
+}
 
 
 def error_page(*, status: int, message: str, service_name: str) -> str:

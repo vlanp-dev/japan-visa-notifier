@@ -260,7 +260,7 @@ class DeliveryAttemptRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM delivery_attempts
-                ORDER BY created_at DESC, id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 (count,),
@@ -273,7 +273,7 @@ class DeliveryAttemptRepository:
                 """
                 SELECT * FROM delivery_attempts
                 WHERE episode_id = ?
-                ORDER BY created_at ASC, id ASC
+                ORDER BY created_at ASC, rowid ASC
                 """,
                 (episode_id,),
             ).fetchall()

@@ -11,11 +11,12 @@ livraison. Le socle fournit :
   nombre de segments) ;
 - application WSGI avec routes, formulaires protégés par CSRF, pages HTML
   échappées et en-têtes de sécurité ;
-- journaux applicatifs, endpoint de santé et serveur de développement.
+- journaux applicatifs, endpoint de santé et serveur de développement ;
+- canal email obligatoire : composition française, envoi SMTP ou boîte de
+  sortie locale, journalisation des succès et des échecs, réémission email.
 
-Le canal email est le canal obligatoire. L'intégration SMS est ajoutée par les
-tâches suivantes du plan ; ce socle ne contacte aucun fournisseur et ne fait
-aucun appel réseau au démarrage.
+L'intégration SMS est ajoutée par les tâches suivantes du plan ; ce socle ne
+contacte aucun fournisseur SMS et ne fait aucun appel réseau au démarrage.
 
 ## Démarrage
 
@@ -29,7 +30,9 @@ Sans fichier `config/app.json`, le service démarre avec les valeurs par défaut
 signature éphémère. Le fichier de configuration peut aussi être indiqué par
 `--config` ou `ALERTS_CONFIG_FILE`.
 
-- Page d'état : <http://127.0.0.1:8000/>
+- Tableau de bord : <http://127.0.0.1:8000/>
+- Nouvel épisode : <http://127.0.0.1:8000/episodes/new>
+- Journal des livraisons : <http://127.0.0.1:8000/deliveries>
 - Santé JSON : <http://127.0.0.1:8000/health> (alias `/healthz`)
 
 Point d'entrée WSGI pour un serveur de production :
@@ -58,9 +61,24 @@ fourni explicitement (au moins 16 caractères) afin que les sessions survivent
 aux redémarrages. En son absence, un secret éphémère est généré et un
 avertissement est journalisé.
 
-La section `email` est facultative. Si elle est renseignée, `smtp_host`,
-`sender` et `recipient` doivent l'être ensemble. Le mot de passe n'est jamais
-affiché par la configuration masquée ni journalisé.
+`service.base_url` est l'URL publique du service utilisée dans les liens des
+emails (page de l'épisode et acquittement). Par défaut elle vaut
+`http://<server.host>:<server.port>` ; en production, renseignez-la explicitement.
+
+La section `email` est facultative, mais le canal email est le canal obligatoire.
+Deux fournisseurs sont possibles via `email.provider` :
+
+- `smtp` (valeur par défaut) : exige `smtp_host`, `sender` et `recipient` ;
+  `username` et `password` activent l'authentification, `use_starttls` vaut
+  `true` par défaut ;
+- `outbox` : écrit chaque message en `.eml` dans `outbox_path` et exige
+  `outbox_path`, `sender` et `recipient`.
+
+Si la section est incomplète, le service démarre quand même : le tableau de bord
+indique « Non configuré » et chaque création d'épisode enregistre une tentative
+email en échec explicite. Une panne d'envoi n'empêche ni l'acquittement ni la
+réémission de l'épisode. Le mot de passe n'est jamais affiché par la
+configuration masquée ni journalisé.
 
 ## Tests
 

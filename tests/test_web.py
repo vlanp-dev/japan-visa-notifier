@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from app.http import Response
@@ -54,6 +56,7 @@ class WebApplicationTests(unittest.TestCase):
         page = client.get("/").text
 
         self.assertEqual(payload["email"]["status"], "configured")
+        self.assertEqual(payload["email"]["provider"], "smtp")
         self.assertIn("Configuré", page)
         self.assertNotIn("super-secret-password", page)
 
@@ -266,6 +269,170 @@ class CsrfHttpTests(unittest.TestCase):
 
         self.assertIn("Secure", response.header("Set-Cookie"))
         self.assertIn("max-age=31536000", response.header("Strict-Transport-Security"))
+
+
+class EmailChannelWebTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.outbox = Path(self._temp.name) / "outbox"
+        self._holder, self.config = temporary_config(
+            service={
+                "name": "Alertes de test",
+                "environment": "test",
+                "base_url": "https://alerts.example.org",
+            },
+            email={
+                "provider": "outbox",
+                "outbox_path": str(self.outbox),
+                "sender": "alerts@example.org",
+                "recipient": "operator@example.org",
+            },
+        )
+        self.addCleanup(self._holder.cleanup)
+        self.app = create_app(self.config, logger=null_logger())
+        self.client = WSGIClient(self.app)
+
+    def _token(self) -> str:
+        self.client.get("/")
+        return self.app.csrf.token_for(self.client.cookies["alerts_session"])
+
+    def _create_episode(self, **overrides) -> str:
+        form = {
+            "csrf_token": self._token(),
+            "change_nature": "Ouverture de la pêche",
+            "page_url": "https://example.org/reglement",
+            "summary": "Le règlement a changé.",
+        }
+        form.update(overrides)
+        response = self.client.post_form("/episodes", form)
+        self.assertEqual(response.status, 303)
+        return response.header("Location")
+
+    def test_new_episode_form_is_available(self) -> None:
+        response = self.client.get("/episodes/new")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("Créer un épisode", response.text)
+        self.assertIn('name="csrf_token"', response.text)
+
+    def test_create_episode_sends_email_and_redirects_to_detail(self) -> None:
+        location = self._create_episode()
+
+        self.assertTrue(location.startswith("/episodes/"))
+        self.assertIn("notice=created", location)
+        self.assertEqual(len(list(self.outbox.glob("*.eml"))), 1)
+
+        detail = self.client.get(location.split("?", 1)[0])
+        self.assertEqual(detail.status, 200)
+        self.assertIn("Ouverture de la pêche", detail.text)
+        self.assertIn("https://example.org/reglement", detail.text)
+        self.assertIn("sent", detail.text)
+        self.assertIn("Acquitter l'épisode", detail.text)
+
+    def test_delivery_log_lists_email_attempts(self) -> None:
+        self._create_episode()
+
+        response = self.client.get("/deliveries")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("email", response.text)
+        self.assertIn("o***@example.org", response.text)
+        self.assertNotIn("operator@example.org", response.text)
+
+    def test_acknowledgement_updates_episode(self) -> None:
+        location = self._create_episode()
+        episode_id = location.split("?", 1)[0].rsplit("/", 1)[-1]
+
+        response = self.client.post_form(
+            f"/episodes/{episode_id}/acknowledge",
+            {"csrf_token": self._token()},
+        )
+
+        self.assertEqual(response.status, 303)
+        detail = self.client.get(f"/episodes/{episode_id}")
+        self.assertIn("Acquitté le", detail.text)
+        self.assertIsNotNone(self.app.episodes.get(episode_id).acknowledged_at)
+
+    def test_create_episode_rejects_invalid_input(self) -> None:
+        response = self.client.post_form(
+            "/episodes",
+            {
+                "csrf_token": self._token(),
+                "change_nature": "",
+                "page_url": "javascript:alert(1)",
+            },
+        )
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("Créer un épisode", response.text)
+
+    def test_create_episode_requires_csrf_token(self) -> None:
+        response = self.client.post_form(
+            "/episodes",
+            {
+                "change_nature": "Nature",
+                "page_url": "https://example.org/page",
+            },
+        )
+
+        self.assertEqual(response.status, 403)
+
+    def test_unknown_episode_returns_404(self) -> None:
+        response = self.client.get("/episodes/unknown")
+        self.assertEqual(response.status, 404)
+
+    def test_email_failure_is_visible_and_does_not_block_ack_or_resend(self) -> None:
+        class FailingProvider:
+            name = "fake"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def send(self, message) -> None:
+                self.calls += 1
+                raise RuntimeError("fournisseur email indisponible")
+
+        provider = FailingProvider()
+        app = create_app(
+            self.config, email_provider=provider, logger=null_logger()
+        )
+        client = WSGIClient(app)
+        client.get("/")
+        token = app.csrf.token_for(client.cookies["alerts_session"])
+
+        created = client.post_form(
+            "/episodes",
+            {
+                "csrf_token": token,
+                "change_nature": "Nature",
+                "page_url": "https://example.org/page",
+            },
+        )
+        self.assertEqual(created.status, 303)
+        location = created.header("Location")
+        episode_id = location.split("?", 1)[0].rsplit("/", 1)[-1]
+
+        detail = client.get(location.split("?", 1)[0])
+        self.assertIn("failed", detail.text)
+        self.assertIn("fournisseur email indisponible", detail.text)
+
+        acknowledged = client.post_form(
+            f"/episodes/{episode_id}/acknowledge",
+            {"csrf_token": app.csrf.token_for(client.cookies["alerts_session"])},
+        )
+        self.assertEqual(acknowledged.status, 303)
+
+        resent = client.post_form(
+            f"/episodes/{episode_id}/resend",
+            {"csrf_token": app.csrf.token_for(client.cookies["alerts_session"])},
+        )
+        self.assertEqual(resent.status, 303)
+        self.assertIn("notice=resent_failed", resent.header("Location"))
+        self.assertEqual(provider.calls, 2)
+        attempts = app.deliveries.list_for_episode(episode_id)
+        self.assertEqual([attempt.kind for attempt in attempts], ["alert", "resend"])
+        self.assertTrue(all(attempt.status == "failed" for attempt in attempts))
 
 
 class ErrorHandlingTests(unittest.TestCase):

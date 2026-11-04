@@ -20,6 +20,7 @@ import secrets
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from .util import redact_mapping
 
@@ -36,6 +37,7 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class EmailConfig:
+    provider: str = "smtp"
     smtp_host: str = ""
     smtp_port: int = 25
     username: str = ""
@@ -44,13 +46,19 @@ class EmailConfig:
     recipient: str = ""
     use_starttls: bool = True
     timeout_seconds: float = 10.0
+    outbox_path: str = ""
 
     @property
     def configured(self) -> bool:
-        return bool(self.smtp_host and self.sender and self.recipient)
+        if not (self.sender and self.recipient):
+            return False
+        if self.provider == "outbox":
+            return bool(self.outbox_path)
+        return bool(self.smtp_host)
 
     def redacted(self) -> dict[str, Any]:
         return {
+            "provider": self.provider,
             "smtp_host": self.smtp_host,
             "smtp_port": self.smtp_port,
             "username": self.username,
@@ -59,6 +67,7 @@ class EmailConfig:
             "recipient": self.recipient,
             "use_starttls": self.use_starttls,
             "timeout_seconds": self.timeout_seconds,
+            "outbox_path": self.outbox_path,
         }
 
 
@@ -72,6 +81,8 @@ class Config:
     log_level: str = "INFO"
     secret: str = ""
     secret_generated: bool = False
+    base_url: str = ""
+    base_url_configured: bool = False
     email: EmailConfig = field(default_factory=EmailConfig)
     source_path: str | None = None
 
@@ -88,6 +99,7 @@ class Config:
             "service": {
                 "name": self.service_name,
                 "environment": self.environment,
+                "base_url": self.base_url,
             },
             "server": {
                 "host": self.host,
@@ -117,6 +129,13 @@ class Config:
             changes["database_path"] = _as_text(database_path, "database.path")
         if log_level is not None:
             changes["log_level"] = _as_log_level(log_level)
+        if not self.base_url_configured and (
+            "host" in changes or "port" in changes
+        ):
+            changes["base_url"] = (
+                f"http://{changes.get('host', self.host)}:"
+                f"{changes.get('port', self.port)}"
+            )
         return replace(self, **changes)
 
 
@@ -206,6 +225,9 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
         max_length=1000,
     )
     log_level = _as_log_level(logging_section.get("level", "INFO"))
+    base_url = _as_base_url(
+        service.get("base_url", "") or f"http://{host}:{port}", "service.base_url"
+    )
 
     raw_secret = server.get("secret", "")
     if raw_secret is None:
@@ -231,15 +253,36 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
         log_level=log_level,
         secret=secret,
         secret_generated=secret_generated,
+        base_url=base_url,
+        base_url_configured=bool(service.get("base_url")),
         email=email,
         source_path=source_path,
     )
 
 
 def _build_email(section: Mapping[str, Any]) -> EmailConfig:
+    outbox_path = _as_text(
+        section.get("outbox_path", ""), "email.outbox_path", max_length=1000
+    )
     smtp_host = _as_text(
         section.get("smtp_host", ""), "email.smtp_host", max_length=255
     )
+    raw_provider = section.get("provider", "")
+    if raw_provider is None:
+        raw_provider = ""
+    if not isinstance(raw_provider, str):
+        raise ConfigError("email.provider must be a string")
+    provider = raw_provider.strip().lower()
+    if not provider:
+        if smtp_host:
+            provider = "smtp"
+        elif outbox_path:
+            provider = "outbox"
+        else:
+            provider = "smtp"
+    if provider not in {"smtp", "outbox"}:
+        raise ConfigError("email.provider must be one of: smtp, outbox")
+
     smtp_port = _as_int(
         section.get("smtp_port", 25), "email.smtp_port", minimum=1, maximum=65535
     )
@@ -269,13 +312,22 @@ def _build_email(section: Mapping[str, Any]) -> EmailConfig:
         if address and not _looks_like_email(address):
             raise ConfigError(f"email.{field_name} is not a valid email address")
 
-    any_value = smtp_host or sender or recipient
-    if any_value and not (smtp_host and sender and recipient):
+    any_value = bool(
+        smtp_host or username or sender or recipient or outbox_path or raw_provider
+    )
+    if provider == "outbox":
+        if any_value and not (outbox_path and sender and recipient):
+            raise ConfigError(
+                "email provider 'outbox' requires outbox_path, sender and "
+                "recipient to be configured together"
+            )
+    elif any_value and not (smtp_host and sender and recipient):
         raise ConfigError(
             "email requires smtp_host, sender and recipient to be configured together"
         )
 
     return EmailConfig(
+        provider=provider,
         smtp_host=smtp_host,
         smtp_port=smtp_port,
         username=username,
@@ -284,6 +336,7 @@ def _build_email(section: Mapping[str, Any]) -> EmailConfig:
         recipient=recipient,
         use_starttls=use_starttls,
         timeout_seconds=timeout_seconds,
+        outbox_path=outbox_path,
     )
 
 
@@ -365,3 +418,19 @@ def _looks_like_email(address: str) -> bool:
         return False
     local, separator, domain = address.partition("@")
     return bool(separator and local and domain and "@" not in domain)
+
+
+def _as_base_url(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a string")
+    candidate = value.strip()
+    if not candidate:
+        raise ConfigError(f"{name} must not be empty")
+    if len(candidate) > 500:
+        raise ConfigError(f"{name} is too long (maximum 500)")
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(f"{name} must be an absolute http or https URL")
+    if parsed.query or parsed.fragment:
+        raise ConfigError(f"{name} must not contain a query or fragment")
+    return candidate.rstrip("/")

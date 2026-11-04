@@ -93,6 +93,75 @@ class ConfigLoadingTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             write_config(self.directory, document)
 
+    def test_outbox_email_provider_is_selected_by_configuration(self) -> None:
+        document = config_document(
+            email={
+                "provider": "outbox",
+                "outbox_path": "var/outbox",
+                "sender": "alerts@example.org",
+                "recipient": "operator@example.org",
+            }
+        )
+        config = write_config(self.directory, document)
+
+        self.assertTrue(config.email_configured)
+        self.assertEqual(config.email.provider, "outbox")
+        self.assertEqual(config.email.outbox_path, "var/outbox")
+
+    def test_incomplete_outbox_configuration_is_rejected(self) -> None:
+        document = config_document(
+            email={
+                "provider": "outbox",
+                "sender": "alerts@example.org",
+                "recipient": "operator@example.org",
+            }
+        )
+        with self.assertRaises(ConfigError):
+            write_config(self.directory, document)
+
+    def test_invalid_email_provider_and_base_url_are_rejected(self) -> None:
+        cases = [
+            {
+                "email": {
+                    "provider": "carrier-pigeon",
+                    "smtp_host": "smtp.example.org",
+                    "sender": "alerts@example.org",
+                    "recipient": "operator@example.org",
+                }
+            },
+            {"service": {"name": "Test", "base_url": "ftp://example.org"}},
+            {"service": {"name": "Test", "base_url": "https://example.org/?q=1"}},
+        ]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                document = config_document(**overrides)
+                with self.assertRaises(ConfigError):
+                    write_config(self.directory, document)
+
+    def test_base_url_defaults_to_server_address_and_follows_overrides(self) -> None:
+        document = config_document()
+        config = write_config(self.directory, document)
+        self.assertEqual(config.base_url, "http://127.0.0.1:8000")
+        self.assertFalse(config.base_url_configured)
+
+        updated = config.with_overrides(host="0.0.0.0", port=9100)
+        self.assertEqual(updated.base_url, "http://0.0.0.0:9100")
+
+    def test_explicit_base_url_is_preserved_by_overrides(self) -> None:
+        document = config_document(
+            service={
+                "name": "Test",
+                "environment": "test",
+                "base_url": "https://alerts.example.org",
+            }
+        )
+        config = write_config(self.directory, document)
+
+        updated = config.with_overrides(port=9100)
+
+        self.assertEqual(updated.base_url, "https://alerts.example.org")
+        self.assertTrue(updated.base_url_configured)
+
     def test_invalid_values_are_rejected(self) -> None:
         cases = [
             {"server": {"port": 0}},

@@ -14,16 +14,25 @@ from datetime import datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from typing import Callable, Iterable
+from urllib.parse import quote
 
 from . import __version__
+from .alerting import AlertService, UNSET
 from .config import Config
 from .csrf import CSRF_FORM_FIELD, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, CsrfProtector
 from .db import Database
 from .http import HTTPError, Request, Response
 from .logging_config import get_logger
+from .mailer import EmailProvider
 from .repositories import DeliveryAttemptRepository, EpisodeRepository
 from .util import format_timestamp, utcnow
-from .views import error_page, health_page
+from .views import (
+    deliveries_page,
+    episode_page,
+    error_page,
+    health_page,
+    new_episode_page,
+)
 
 Handler = Callable[[Request], Response]
 
@@ -52,6 +61,7 @@ class Route:
     pattern: str
     regex: re.Pattern[str]
     handler: Handler
+    specificity: int = 0
 
 
 class Application:
@@ -63,6 +73,7 @@ class Application:
         database: Database,
         episodes: EpisodeRepository,
         deliveries: DeliveryAttemptRepository,
+        alerts: AlertService,
         *,
         logger=None,
     ) -> None:
@@ -70,12 +81,25 @@ class Application:
         self.database = database
         self.episodes = episodes
         self.deliveries = deliveries
+        self.alerts = alerts
         self.csrf = CsrfProtector(config.secret)
         self._logger = logger or get_logger("web")
         self._routes: list[Route] = []
         self.add_route("GET", "/", self._health_page)
         self.add_route("GET", "/health", self._health_json)
         self.add_route("GET", "/healthz", self._health_json)
+        self.add_route("GET", "/episodes/new", self._new_episode)
+        self.add_route("POST", "/episodes", self._create_episode)
+        self.add_route("GET", "/episodes/{episode_id}", self._episode_detail)
+        self.add_route(
+            "POST",
+            "/episodes/{episode_id}/acknowledge",
+            self._acknowledge_episode,
+        )
+        self.add_route(
+            "POST", "/episodes/{episode_id}/resend", self._resend_episode
+        )
+        self.add_route("GET", "/deliveries", self._deliveries)
 
     def add_route(self, method: str, pattern: str, handler: Handler) -> None:
         method = method.upper()
@@ -83,7 +107,15 @@ class Application:
             raise ValueError("HTTP method must contain only letters")
         if not callable(handler):
             raise ValueError("route handler must be callable")
-        self._routes.append(Route(method, pattern, _compile_pattern(pattern), handler))
+        self._routes.append(
+            Route(
+                method,
+                pattern,
+                _compile_pattern(pattern),
+                handler,
+                _specificity(pattern),
+            )
+        )
 
     def __call__(self, environ, start_response):
         started = time.perf_counter()
@@ -165,7 +197,9 @@ class Application:
     def _dispatch(self, request: Request) -> Response:
         path_match = False
         allowed: set[str] = set()
-        for route in self._routes:
+        selected: tuple[Route, re.Match[str]] | None = None
+        selected_key: tuple[int, int] = (-1, -1)
+        for index, route in enumerate(self._routes):
             match = route.regex.match(request.path)
             if not match:
                 continue
@@ -176,7 +210,16 @@ class Application:
             if route.method == request.method or (
                 request.method == "HEAD" and route.method == "GET"
             ):
-                return route.handler(request.with_path_params(match.groupdict()))
+                # More specific routes win (``/episodes/new`` over
+                # ``/episodes/{id}``); later registrations break ties so
+                # callers can extend the application deterministically.
+                key = (route.specificity, index)
+                if key > selected_key:
+                    selected = (route, match)
+                    selected_key = key
+        if selected is not None:
+            route, match = selected
+            return route.handler(request.with_path_params(match.groupdict()))
         if path_match:
             allow = ", ".join(sorted(allowed))
             raise HTTPError(
@@ -223,11 +266,90 @@ class Application:
             "email": {
                 "status": "configured"
                 if self.config.email_configured
-                else "unconfigured"
+                else "unconfigured",
+                "provider": (
+                    self.config.email.provider
+                    if self.config.email_configured
+                    else ""
+                ),
             },
             "time": format_timestamp(),
         }
         return Response.json(payload, status=200 if database_ok else 503)
+
+    def _new_episode(self, request: Request) -> Response:
+        markup = new_episode_page(
+            config=self.config, csrf_token=self._token(request)
+        )
+        return Response.html(markup)
+
+    def _create_episode(self, request: Request) -> Response:
+        values = {
+            "change_nature": request.form.get("change_nature", ""),
+            "page_url": request.form.get("page_url", ""),
+            "summary": request.form.get("summary", ""),
+        }
+        try:
+            episode = self.alerts.create_episode(
+                change_nature=values["change_nature"],
+                page_url=values["page_url"],
+                summary=values["summary"],
+            )
+        except ValueError as exc:
+            markup = new_episode_page(
+                config=self.config,
+                csrf_token=self._token(request),
+                error=str(exc),
+                values=values,
+            )
+            return Response.html(markup, status=400)
+        location = (
+            f"/episodes/{quote(episode.id, safe='')}?notice=created"
+        )
+        return Response.redirect(location)
+
+    def _episode_detail(self, request: Request) -> Response:
+        episode = self.alerts.get_episode(request.path_params["episode_id"])
+        if episode is None:
+            raise HTTPError(404, "Épisode introuvable.")
+        attempts = self.deliveries.list_for_episode(episode.id)
+        markup = episode_page(
+            config=self.config,
+            episode=episode,
+            attempts=attempts,
+            csrf_token=self._token(request),
+            notice=request.query_one("notice"),
+        )
+        return Response.html(markup)
+
+    def _acknowledge_episode(self, request: Request) -> Response:
+        episode = self.alerts.acknowledge(request.path_params["episode_id"])
+        if episode is None:
+            raise HTTPError(404, "Épisode introuvable.")
+        location = (
+            f"/episodes/{quote(episode.id, safe='')}?notice=acknowledged"
+        )
+        return Response.redirect(location)
+
+    def _resend_episode(self, request: Request) -> Response:
+        episode = self.alerts.get_episode(request.path_params["episode_id"])
+        if episode is None:
+            raise HTTPError(404, "Épisode introuvable.")
+        result = self.alerts.resend(episode)
+        notice = "resent_sent" if result.status == "sent" else "resent_failed"
+        location = (
+            f"/episodes/{quote(episode.id, safe='')}?notice={notice}"
+        )
+        return Response.redirect(location)
+
+    def _deliveries(self, request: Request) -> Response:
+        attempts = self.deliveries.list_recent(200)
+        return Response.html(
+            deliveries_page(config=self.config, attempts=attempts)
+        )
+
+    def _token(self, request: Request) -> str:
+        return self.csrf.token_for(request.session_id)
 
     def _database_ok(self) -> bool:
         try:
@@ -258,6 +380,8 @@ def create_app(
     database: Database | None = None,
     episodes: EpisodeRepository | None = None,
     deliveries: DeliveryAttemptRepository | None = None,
+    alerts: AlertService | None = None,
+    email_provider: EmailProvider | None = UNSET,  # type: ignore[assignment]
     logger=None,
     clock: Callable[[], datetime] = utcnow,
     extra_routes: Iterable[tuple[str, str, Handler]] = (),
@@ -270,16 +394,36 @@ def create_app(
         episodes = EpisodeRepository(database, now=clock)
     if deliveries is None:
         deliveries = DeliveryAttemptRepository(database, now=clock)
+    if alerts is None:
+        alerts = AlertService(
+            config,
+            episodes,
+            deliveries,
+            provider=email_provider,
+            logger=logger,
+            clock=clock,
+        )
     app = Application(
         config,
         database,
         episodes,
         deliveries,
+        alerts,
         logger=logger,
     )
     for method, pattern, handler in extra_routes:
         app.add_route(method, pattern, handler)
     return app
+
+
+def _specificity(pattern: str) -> int:
+    """Count literal path segments so specific routes win over parameters."""
+
+    return sum(
+        1
+        for segment in pattern.strip("/").split("/")
+        if segment and not (segment.startswith("{") and segment.endswith("}"))
+    )
 
 
 def _compile_pattern(pattern: str) -> re.Pattern[str]:
