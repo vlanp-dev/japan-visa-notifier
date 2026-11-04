@@ -16,19 +16,36 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import secrets
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from .util import redact_mapping
+from .util import mask_sms, redact_mapping, redact_url
 
 DEFAULT_CONFIG_PATH = "config/app.json"
 ENV_PREFIX = "ALERTS__"
 CONFIG_FILE_ENV = "ALERTS_CONFIG_FILE"
 
 VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+
+DEFAULT_SMS_BODY_TEMPLATE = (
+    '{"to": "{{to}}", "sender": "{{sender}}", "message": "{{message}}"}'
+)
+SMS_REQUIRED_PLACEHOLDERS = ("{{to}}", "{{message}}")
+SMS_PLACEHOLDERS = SMS_REQUIRED_PLACEHOLDERS + ("{{sender}}",)
+SMS_METHODS = frozenset({"POST", "PUT", "PATCH"})
+SMS_AUTH_MODES = frozenset({"bearer", "header", "query"})
+DEFAULT_SMS_AUTH_HEADER = "Authorization"
+DEFAULT_SMS_AUTH_QUERY_PARAM = "api_key"
+DEFAULT_SMS_MAX_RESPONSE_BYTES = 64 * 1024
+MIN_SMS_MAX_RESPONSE_BYTES = 256
+MAX_SMS_MAX_RESPONSE_BYTES = 1024 * 1024
+
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_PHONE_ALLOWED_RE = re.compile(r"^\+?[0-9 ().-]+$")
 
 
 class ConfigError(ValueError):
@@ -71,6 +88,76 @@ class EmailConfig:
         }
 
 
+@dataclass(frozen=True, repr=False)
+class SmsConfig:
+    """Optional SMS provider settings.
+
+    No provider is selected by default. The channel is considered configured
+    only when every required value is present; an operator who wants SMS must
+    choose and verify a free provider themselves.
+    """
+
+    provider: str = ""
+    url: str = ""
+    method: str = "POST"
+    auth_mode: str = "bearer"
+    auth_header: str = DEFAULT_SMS_AUTH_HEADER
+    auth_query_param: str = DEFAULT_SMS_AUTH_QUERY_PARAM
+    sender: str = ""
+    recipient: str = ""
+    credential: str = ""
+    body_template: str = ""
+    timeout_seconds: float = 10.0
+    max_response_bytes: int = DEFAULT_SMS_MAX_RESPONSE_BYTES
+    success_json_field: str = ""
+    success_json_value: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return all(
+            value.strip()
+            for value in (
+                self.provider,
+                self.url,
+                self.sender,
+                self.recipient,
+                self.credential,
+            )
+        )
+
+    @property
+    def is_configured(self) -> bool:
+        return self.configured
+
+    def redacted(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "url": redact_url(self.url),
+            "method": self.method,
+            "auth_mode": self.auth_mode,
+            "auth_header": self.auth_header,
+            "auth_query_param": self.auth_query_param,
+            "sender": self.sender,
+            "recipient": mask_sms(self.recipient) if self.recipient else "",
+            "credential": "***" if self.credential else "",
+            "body_template_configured": bool(self.body_template),
+            "timeout_seconds": self.timeout_seconds,
+            "max_response_bytes": self.max_response_bytes,
+            "success_predicate_configured": bool(self.success_json_field),
+            "configured": self.configured,
+        }
+
+    def __repr__(self) -> str:
+        recipient = mask_sms(self.recipient) if self.recipient else ""
+        credential = "***" if self.credential else ""
+        return (
+            "SmsConfig("
+            f"provider={self.provider!r}, url={redact_url(self.url)!r}, "
+            f"recipient={recipient!r}, credential={credential!r}, "
+            f"configured={self.configured!r})"
+        )
+
+
 @dataclass(frozen=True)
 class Config:
     service_name: str = "Alertes épisodes"
@@ -85,10 +172,15 @@ class Config:
     base_url_configured: bool = False
     email: EmailConfig = field(default_factory=EmailConfig)
     source_path: str | None = None
+    sms: SmsConfig = field(default_factory=SmsConfig)
 
     @property
     def email_configured(self) -> bool:
         return self.email.configured
+
+    @property
+    def sms_configured(self) -> bool:
+        return self.sms.configured
 
     @property
     def secure_cookies(self) -> bool:
@@ -109,6 +201,7 @@ class Config:
             "database": {"path": self.database_path},
             "logging": {"level": self.log_level},
             "email": self.email.redacted(),
+            "sms": self.sms.redacted(),
         }
         return redact_mapping(document)
 
@@ -208,6 +301,7 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
     database = _section(document, "database")
     logging_section = _section(document, "logging")
     email_section = _section(document, "email")
+    sms_section = _section(document, "sms")
 
     service_name = _as_text(
         service.get("name", "Alertes épisodes"), "service.name", max_length=100
@@ -243,6 +337,7 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
         raise ConfigError("server.secret must contain at least 16 characters")
 
     email = _build_email(email_section)
+    sms = _build_sms(sms_section)
 
     return Config(
         service_name=service_name,
@@ -256,6 +351,7 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
         base_url=base_url,
         base_url_configured=bool(service.get("base_url")),
         email=email,
+        sms=sms,
         source_path=source_path,
     )
 
@@ -338,6 +434,176 @@ def _build_email(section: Mapping[str, Any]) -> EmailConfig:
         timeout_seconds=timeout_seconds,
         outbox_path=outbox_path,
     )
+
+
+def _build_sms(section: Mapping[str, Any]) -> SmsConfig:
+    provider = _as_text(
+        section.get("provider", ""), "sms.provider", max_length=100
+    )
+    url = _as_text(section.get("url", ""), "sms.url", max_length=2048)
+    method = _as_text(
+        section.get("method", "POST"), "sms.method", max_length=10
+    ).upper()
+    auth_mode = _as_text(
+        section.get("auth_mode", "bearer"), "sms.auth_mode", max_length=20
+    ).lower()
+    auth_header = (
+        _as_text(
+            section.get("auth_header", DEFAULT_SMS_AUTH_HEADER),
+            "sms.auth_header",
+            max_length=100,
+        )
+        or DEFAULT_SMS_AUTH_HEADER
+    )
+    auth_query_param = (
+        _as_text(
+            section.get("auth_query_param", DEFAULT_SMS_AUTH_QUERY_PARAM),
+            "sms.auth_query_param",
+            max_length=100,
+        )
+        or DEFAULT_SMS_AUTH_QUERY_PARAM
+    )
+    sender = _as_text(section.get("sender", ""), "sms.sender", max_length=64)
+    recipient = _as_text(
+        section.get("recipient", ""), "sms.recipient", max_length=40
+    )
+    credential_value = section.get("credential", "")
+    if credential_value is None:
+        credential_value = ""
+    if not isinstance(credential_value, str):
+        raise ConfigError("sms.credential must be a string")
+    credential = credential_value.strip()
+    if len(credential) > 4096:
+        raise ConfigError("sms.credential is too long (maximum 4096)")
+    body_template = _as_text(
+        section.get("body_template", ""), "sms.body_template", max_length=8192
+    )
+    timeout_seconds = _as_float(
+        section.get("timeout_seconds", 10.0),
+        "sms.timeout_seconds",
+        minimum=0.1,
+        maximum=60.0,
+    )
+    max_response_bytes = _as_int(
+        section.get("max_response_bytes", DEFAULT_SMS_MAX_RESPONSE_BYTES),
+        "sms.max_response_bytes",
+        minimum=MIN_SMS_MAX_RESPONSE_BYTES,
+        maximum=MAX_SMS_MAX_RESPONSE_BYTES,
+    )
+    success_json_field = _as_text(
+        section.get("success_json_field", ""),
+        "sms.success_json_field",
+        max_length=200,
+    )
+    success_json_value = _as_text(
+        section.get("success_json_value", ""),
+        "sms.success_json_value",
+        max_length=500,
+    )
+
+    if section and not (provider and url and sender and recipient and credential):
+        raise ConfigError(
+            "sms requires provider, url, sender, recipient and credential "
+            "to be configured together"
+        )
+    if method not in SMS_METHODS:
+        raise ConfigError(
+            "sms.method must be one of " + ", ".join(sorted(SMS_METHODS))
+        )
+    if auth_mode not in SMS_AUTH_MODES:
+        raise ConfigError(
+            "sms.auth_mode must be one of " + ", ".join(sorted(SMS_AUTH_MODES))
+        )
+    if not _HEADER_NAME_RE.match(auth_header):
+        raise ConfigError("sms.auth_header is not a valid HTTP header name")
+    if any(
+        character.isspace() or ord(character) < 0x20
+        for character in auth_query_param
+    ):
+        raise ConfigError(
+            "sms.auth_query_param must not contain spaces or control characters"
+        )
+    if any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in credential
+    ):
+        raise ConfigError("sms.credential must not contain control characters")
+    if any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in sender
+    ):
+        raise ConfigError("sms.sender must not contain control characters")
+    if recipient and not _looks_like_phone(recipient):
+        raise ConfigError("sms.recipient must be a single phone number")
+    if url:
+        _validate_http_url(url, "sms.url")
+    if body_template:
+        _validate_sms_body_template(body_template)
+    if success_json_value and not success_json_field:
+        raise ConfigError(
+            "sms.success_json_value requires sms.success_json_field"
+        )
+
+    return SmsConfig(
+        provider=provider,
+        url=url,
+        method=method,
+        auth_mode=auth_mode,
+        auth_header=auth_header,
+        auth_query_param=auth_query_param,
+        sender=sender,
+        recipient=recipient,
+        credential=credential,
+        body_template=body_template,
+        timeout_seconds=timeout_seconds,
+        max_response_bytes=max_response_bytes,
+        success_json_field=success_json_field,
+        success_json_value=success_json_value,
+    )
+
+
+def _validate_http_url(value: str, name: str) -> None:
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be an absolute http or https URL") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(f"{name} must be an absolute http or https URL")
+
+
+def _validate_sms_body_template(value: str) -> None:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ConfigError("sms.body_template must be valid JSON") from exc
+    if not isinstance(parsed, (dict, list)):
+        raise ConfigError("sms.body_template must be a JSON object or array")
+    present: set[str] = set()
+    _collect_placeholders(parsed, present)
+    missing = [item for item in SMS_REQUIRED_PLACEHOLDERS if item not in present]
+    if missing:
+        raise ConfigError(
+            "sms.body_template must contain " + " and ".join(missing)
+        )
+
+
+def _collect_placeholders(value: Any, present: set[str]) -> None:
+    if isinstance(value, str):
+        for placeholder in SMS_PLACEHOLDERS:
+            if placeholder in value:
+                present.add(placeholder)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_placeholders(item, present)
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            _collect_placeholders(item, present)
+
+
+def _looks_like_phone(value: str) -> bool:
+    if not _PHONE_ALLOWED_RE.match(value):
+        return False
+    digits = re.sub(r"\D", "", value)
+    return 5 <= len(digits) <= 15
 
 
 def _section(document: Mapping[str, Any], name: str) -> Mapping[str, Any]:

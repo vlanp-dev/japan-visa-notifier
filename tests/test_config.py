@@ -195,6 +195,153 @@ class ConfigLoadingTests(unittest.TestCase):
                 environ={"ALERTS__SERVER__PORT__NESTED": "1"},
             )
 
+    def test_sms_block_is_optional_and_inactive_by_default(self) -> None:
+        path = self.directory / "empty.json"
+        path.write_text("{}", encoding="utf-8")
+
+        config = load_config(path=path, environ={})
+
+        self.assertFalse(config.sms_configured)
+        self.assertFalse(config.sms.configured)
+        self.assertEqual(config.sms.provider, "")
+        self.assertFalse(config.redacted()["sms"]["configured"])
+
+    def test_valid_sms_configuration_is_loaded_and_normalised(self) -> None:
+        document = config_document(
+            sms={
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "method": "post",
+                "auth_mode": "BEARER",
+                "sender": "Alertes",
+                "recipient": "+33 6 12 34 56 78",
+                "credential": "sms-secret",
+                "body_template": '{"to": "{{to}}", "text": "{{message}}"}',
+                "timeout_seconds": 5,
+                "success_json_field": "status",
+                "success_json_value": "ok",
+            }
+        )
+
+        config = write_config(self.directory, document)
+
+        self.assertTrue(config.sms_configured)
+        self.assertEqual(config.sms.method, "POST")
+        self.assertEqual(config.sms.auth_mode, "bearer")
+        self.assertEqual(config.sms.timeout_seconds, 5.0)
+        self.assertEqual(config.sms.success_json_field, "status")
+        self.assertTrue(config.redacted()["sms"]["configured"])
+
+    def test_sms_environment_overrides_are_applied(self) -> None:
+        document = config_document(
+            sms={
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "file-secret",
+            }
+        )
+        path = self.directory / "config.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        config = load_config(
+            path=path,
+            environ={
+                "ALERTS__SMS__CREDENTIAL": "env-secret",
+                "ALERTS__SMS__METHOD": "put",
+                "ALERTS__SMS__TIMEOUT_SECONDS": "3.5",
+            },
+        )
+
+        self.assertEqual(config.sms.credential, "env-secret")
+        self.assertEqual(config.sms.method, "PUT")
+        self.assertEqual(config.sms.timeout_seconds, 3.5)
+
+    def test_redacted_sms_configuration_hides_url_secrets_and_credential(self) -> None:
+        document = config_document(
+            sms={
+                "provider": "free-sms",
+                "url": "https://user:pass@sms.example.org/send?api_key=url-secret",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "credential-secret",
+            }
+        )
+        config = write_config(self.directory, document)
+
+        serialized = json.dumps(config.redacted())
+        self.assertNotIn("url-secret", serialized)
+        self.assertNotIn("credential-secret", serialized)
+        self.assertNotIn("+33612345678", serialized)
+        self.assertNotIn("credential-secret", repr(config.sms))
+        self.assertEqual(config.redacted()["sms"]["credential"], "***")
+        self.assertEqual(config.redacted()["sms"]["recipient"], "***78")
+        self.assertIn("?***", config.redacted()["sms"]["url"])
+
+    def test_partial_or_invalid_sms_configuration_is_rejected(self) -> None:
+        cases = [
+            {"provider": "free-sms"},
+            {
+                "provider": "free-sms",
+                "url": "ftp://sms.example.org/send",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+            },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "method": "DELETE",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+            },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "auth_mode": "magic",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+            },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "sender": "Alertes",
+                "recipient": "+33612345678,+33698765432",
+                "credential": "x",
+            },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+                "body_template": '{"text": "{{message}}"}',
+            },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+                "success_json_value": "ok",
+            },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/send",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+                "timeout_seconds": 0,
+            },
+        ]
+        for sms in cases:
+            with self.subTest(sms=sms):
+                with self.assertRaises(ConfigError):
+                    write_config(self.directory, config_document(sms=sms))
+
     def test_with_overrides_validates_values(self) -> None:
         document = config_document()
         config = write_config(self.directory, document)

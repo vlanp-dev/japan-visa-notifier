@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 MAX_ERROR_LENGTH = 1000
 
@@ -104,3 +105,32 @@ def mask_recipient(channel: str, recipient: str) -> str:
     if channel == "sms":
         return mask_sms(recipient)
     return "***"
+
+
+def redact_url(value: str) -> str:
+    """Return a URL safe to display: credentials, query and fragment hidden."""
+
+    text = (value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return "***"
+
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    if parts.scheme and netloc:
+        result = f"{parts.scheme}://{netloc}{parts.path}"
+    elif parts.scheme:
+        result = f"{parts.scheme}:{parts.path}"
+    else:
+        result = parts.path
+    if parts.query:
+        result += "?***"
+    if parts.fragment:
+        result += "#***"
+    return result or "***"
