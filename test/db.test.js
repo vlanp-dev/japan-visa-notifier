@@ -57,7 +57,15 @@ test('initial migration creates all foundation tables and indexes', (t) => {
     .map((row) => row.name);
   assert.ok(indexes.includes('idx_email_attempts_one_per_episode'));
   assert.ok(indexes.includes('idx_episodes_status'));
+  assert.ok(indexes.includes('idx_episodes_ack_nonce'));
   assert.ok(indexes.includes('idx_episode_rules_episode'));
+
+  const episodeColumns = db
+    .prepare('PRAGMA table_info(episodes)')
+    .all()
+    .map((column) => column.name);
+  assert.ok(episodeColumns.includes('ack_nonce'));
+  assert.ok(episodeColumns.includes('ack_token_expires_at'));
 
   const partialIndex = db
     .prepare(`
@@ -80,7 +88,7 @@ test('migrations are idempotent across reopen', (t) => {
 
   const second = openDatabase(databasePath);
   t.after(() => second.close());
-  assert.equal(second.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, 1);
+  assert.equal(second.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, MIGRATIONS.length);
   assert.equal(second.prepare('SELECT value FROM settings WHERE key = ?').get('sender').value, 'a');
 });
 

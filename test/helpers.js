@@ -93,7 +93,15 @@ export async function createTestHarness(t, { env = {}, registerRoutes } = {}) {
   });
   const db = openDatabase(config.databasePath);
   const repositories = createRepositories(db);
-  const app = createApp({ config, logger, db, repositories, registerRoutes });
+  const app = createApp({
+    config,
+    logger,
+    db,
+    repositories,
+    registerRoutes: registerRoutes
+      ? (application) => registerRoutes(application, { config, logger, db, repositories })
+      : undefined,
+  });
   const server = createServer((req, res) => {
     void app.handle(req, res);
   });

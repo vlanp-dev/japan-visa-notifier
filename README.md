@@ -36,6 +36,7 @@ All configuration comes from environment variables.
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:<PORT>` | Public origin used to build absolute links (acknowledgement, embassy page). Required in production and must be `http` or `https`. |
 | `OPERATOR_USERNAME` | `operator` in development/test | HTTP Basic auth user. Required in production. |
 | `OPERATOR_PASSWORD` | `development-password` in development/test | HTTP Basic auth password. Required in production (at least 12 characters). |
+| `ACK_TOKEN_SECRET` | random, persisted in `app_secrets` | Optional HMAC secret used to sign acknowledgement links. When unset, a random secret is generated once and stored in the database. In production an explicit value must be at least 32 characters. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
 | `MAX_BODY_BYTES` | `65536` | Maximum accepted request body size. |
 
@@ -50,23 +51,41 @@ it to a `0600` file; this foundation does not require it.
 ## HTTP surface
 
 - `GET /health` is public, unauthenticated, and returns `{"status":"ok","database":"ok"}`.
-  Every other route is protected by HTTP Basic auth.
-- State-changing requests use a CSRF double-submit token. A `csrf_token` cookie
-  is issued on safe requests and must be echoed in the `x-csrf-token` header or
-  in the `_csrf` form field.
+- `GET /ack/<token>` and `POST /ack/<token>` are public signed links. The GET
+  shows a confirmation page and never changes state; the POST acknowledges an
+  open episode. A missing, malformed, tampered, expired or mismatched token
+  returns an error page and changes nothing, as does a replay. The HMAC-signed
+  token is the capability, so these two routes do not use Basic auth or the CSRF
+  token.
+- Every other route is protected by HTTP Basic auth.
+- Other state-changing requests use a CSRF double-submit token. A `csrf_token`
+  cookie is issued on safe requests and must be echoed in the `x-csrf-token`
+  header or in the `_csrf` form field.
 - Security headers are applied to every response, request bodies are capped by
   `MAX_BODY_BYTES`, and unexpected errors return a generic 500 without internal
   details.
 
+## Acknowledgement links
+
+Opening an episode stores a random nonce and an expiry (seven days) on the
+episode and returns an absolute link built from `PUBLIC_BASE_URL`. The token is
+`base64url(payload).base64url(HMAC-SHA256)`, where the payload carries the
+episode id, the nonce and the expiry. A link is therefore single-episode and
+single-use: once the episode is acknowledged, the same link only shows an
+“already acknowledged” page. No link is stored in plaintext; the signing secret
+comes from `ACK_TOKEN_SECRET` or from `app_secrets` when that variable is unset.
+
 ## Database
 
 SQLite is opened through `node:sqlite` with foreign keys enabled, WAL mode and
-idempotent migrations. The initial schema contains:
+idempotent migrations. The schema contains:
 
 - `settings` — key/value operator settings (sender, recipient, sending
   subdomain in later tasks).
 - `app_secrets` — internal secrets such as the acknowledgement signing secret.
-- `episodes` — opened alert episodes and their acknowledgement state.
+- `episodes` — opened alert episodes, their acknowledgement state, and the
+  per-episode nonce plus expiry that bind an acknowledgement link to the
+  episode.
 - `episode_rules` — rules triggered in an episode, one row per rule.
 - `email_attempts` — one attempt per episode (`accepted`, `refused` or
   `not_attempted`), plus independent test sends; a partial unique index enforces

@@ -21,6 +21,7 @@ test('development has safe, usable defaults', () => {
   assert.equal(config.logLevel, 'info');
   assert.equal(config.maxBodyBytes, 65536);
   assert.equal(config.secureCookies, false);
+  assert.equal(config.ackTokenSecret, undefined);
 });
 
 test('explicit environment values are honored and normalized', () => {
@@ -36,6 +37,7 @@ test('explicit environment values are honored and normalized', () => {
       OPERATOR_PASSWORD: 'a-long-production-password',
       LOG_LEVEL: 'warn',
       MAX_BODY_BYTES: '4096',
+      ACK_TOKEN_SECRET: 'a-production-ack-token-secret-32chars',
     },
     { cwd: '/ignored' },
   );
@@ -48,6 +50,21 @@ test('explicit environment values are honored and normalized', () => {
   assert.equal(config.secureCookies, true);
   assert.equal(config.logLevel, 'warn');
   assert.equal(config.maxBodyBytes, 4096);
+  assert.equal(config.ackTokenSecret, 'a-production-ack-token-secret-32chars');
+});
+
+test('production rejects a short acknowledgement signing secret', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        APP_ENV: 'production',
+        PUBLIC_BASE_URL: 'https://alerts.example.test',
+        OPERATOR_USERNAME: 'operator-prod',
+        OPERATOR_PASSWORD: 'a-long-production-password',
+        ACK_TOKEN_SECRET: 'too-short',
+      }),
+    (error) => error instanceof ConfigError && /ACK_TOKEN_SECRET/.test(error.message),
+  );
 });
 
 test('port zero is accepted for ephemeral test servers', () => {

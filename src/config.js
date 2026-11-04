@@ -114,6 +114,11 @@ export function loadConfig(env = process.env, { cwd = process.cwd() } = {}) {
     }
   }
 
+  const ackTokenSecret = readOptionalString(env, 'ACK_TOKEN_SECRET');
+  if (isProduction && ackTokenSecret !== undefined && ackTokenSecret.length < 32) {
+    throw new ConfigError('ACK_TOKEN_SECRET doit contenir au moins 32 caractères en production.');
+  }
+
   const logLevel = readOptionalString(env, 'LOG_LEVEL') ?? DEFAULT_LOG_LEVEL;
   if (!LOG_LEVELS.includes(logLevel)) {
     throw new ConfigError(`LOG_LEVEL doit valoir l’une des valeurs suivantes : ${LOG_LEVELS.join(', ')}.`);
@@ -133,6 +138,7 @@ export function loadConfig(env = process.env, { cwd = process.cwd() } = {}) {
     databasePath,
     publicBaseUrl,
     operator: Object.freeze({ username, password }),
+    ackTokenSecret,
     logLevel,
     maxBodyBytes,
     secureCookies: publicBaseUrl.startsWith('https:'),

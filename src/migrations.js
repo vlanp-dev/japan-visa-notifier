@@ -78,6 +78,18 @@ export const MIGRATIONS = Object.freeze([
       CREATE INDEX idx_email_attempts_kind_status ON email_attempts (kind, status, id);
     `,
   },
+  {
+    version: 2,
+    name: 'acknowledgement token state',
+    up: `
+      ALTER TABLE episodes ADD COLUMN ack_nonce TEXT;
+      ALTER TABLE episodes ADD COLUMN ack_token_expires_at TEXT;
+
+      CREATE UNIQUE INDEX idx_episodes_ack_nonce
+        ON episodes (ack_nonce)
+        WHERE ack_nonce IS NOT NULL;
+    `,
+  },
 ]);
 
 export function migrate(db, migrations = MIGRATIONS) {

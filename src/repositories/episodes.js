@@ -29,6 +29,8 @@ function rowToEpisode(row) {
     embassyPageUrl: row.embassy_page_url,
     excerpt: row.excerpt,
     contentHash: row.content_hash,
+    ackNonce: row.ack_nonce,
+    ackTokenExpiresAt: row.ack_token_expires_at,
   };
 }
 
@@ -60,6 +62,8 @@ export class EpisodesRepository {
       embassyPageUrl = null,
       excerpt = '',
       contentHash = null,
+      ackNonce = null,
+      ackTokenExpiresAt = null,
       rules = [],
     } = {},
   ) {
@@ -70,6 +74,12 @@ export class EpisodesRepository {
       throw new TypeError('excerpt must be a string.');
     }
     requireOptionalString(contentHash, 'contentHash');
+    if (ackNonce !== null && ackNonce !== undefined) {
+      requireNonEmptyString(ackNonce, 'ackNonce');
+    }
+    if (ackTokenExpiresAt !== null && ackTokenExpiresAt !== undefined) {
+      requireIsoTimestamp(ackTokenExpiresAt, 'ackTokenExpiresAt');
+    }
     if (!Array.isArray(rules) || rules.length === 0) {
       throw new TypeError('rules must be a non-empty array.');
     }
@@ -82,14 +92,20 @@ export class EpisodesRepository {
       seen.add(rule.ruleKey);
     }
 
+    const nonce = ackNonce ?? null;
+    const tokenExpiresAt = ackTokenExpiresAt ?? null;
+
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = this.db
         .prepare(`
-          INSERT INTO episodes (opened_at, status, embassy_name, embassy_page_url, excerpt, content_hash)
-          VALUES (?, 'open', ?, ?, ?, ?)
+          INSERT INTO episodes (
+            opened_at, status, embassy_name, embassy_page_url, excerpt, content_hash,
+            ack_nonce, ack_token_expires_at
+          )
+          VALUES (?, 'open', ?, ?, ?, ?, ?, ?)
         `)
-        .run(at, embassyName, embassyPageUrl, excerpt, contentHash);
+        .run(at, embassyName, embassyPageUrl, excerpt, contentHash, nonce, tokenExpiresAt);
       const episodeId = Number(result.lastInsertRowid);
       const insertRule = this.db.prepare(`
         INSERT INTO episode_rules (episode_id, rule_key, label, detail, created_at)

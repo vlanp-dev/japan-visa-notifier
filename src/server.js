@@ -1,25 +1,47 @@
 import { createServer } from 'node:http';
+import { createAckTokenSigner } from './ack/ack-token-signer.js';
+import { registerAckRoutes } from './ack/routes.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
 import { createApp } from './http/app.js';
 import { createLogger } from './logger.js';
 import { createRepositories } from './repositories/index.js';
+import { EpisodeService } from './services/episode-service.js';
 
 /**
  * Wire configuration, logging, SQLite and the HTTP application into a service
  * object. Starting the service requires no email configuration whatsoever.
  */
-export function createService({ env = process.env, logger } = {}) {
+export function createService({ env = process.env, logger, ackTokenSigner, episodeService } = {}) {
   const config = loadConfig(env);
+  const db = openDatabase(config.databasePath);
+  const repositories = createRepositories(db);
+  const tokenSigner =
+    ackTokenSigner ??
+    createAckTokenSigner({
+      appSecrets: repositories.appSecrets,
+      secret: config.ackTokenSecret,
+      publicBaseUrl: config.publicBaseUrl,
+    });
+  const episodes =
+    episodeService ??
+    new EpisodeService({
+      repositories,
+      tokenSigner,
+    });
   const log =
     logger ??
     createLogger({
       level: config.logLevel,
-      secrets: [config.operator.password],
+      secrets: [config.operator.password, tokenSigner.secret],
     });
-  const db = openDatabase(config.databasePath);
-  const repositories = createRepositories(db);
-  const app = createApp({ config, logger: log, db, repositories });
+  const app = createApp({
+    config,
+    logger: log,
+    db,
+    repositories,
+    registerRoutes: (httpApp) => registerAckRoutes(httpApp, { episodeService: episodes }),
+  });
   const server = createServer((req, res) => {
     app.handle(req, res).catch((error) => {
       log.error('http_unhandled_failure', { error });
@@ -40,6 +62,8 @@ export function createService({ env = process.env, logger } = {}) {
     logger: log,
     db,
     repositories,
+    ackTokenSigner: tokenSigner,
+    episodeService: episodes,
     app,
     server,
     listen() {

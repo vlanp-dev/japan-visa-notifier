@@ -28,6 +28,41 @@ test('the service starts and stays healthy without any email configuration', asy
   assert.equal(service.repositories.settings.get('sender'), null);
 });
 
+test('the service exposes public signed acknowledgement links', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ambassade-alerts-ack-service-'));
+  const service = createService({
+    env: serviceEnv(dir, { PUBLIC_BASE_URL: 'https://alerts.example.test' }),
+  });
+  t.after(async () => {
+    await service.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const address = await service.listen();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  const invalid = await fetch(`${baseUrl}/ack/not-a-token`);
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.headers.get('content-type'), /text\/html/);
+
+  const opened = service.episodeService.openEpisode({
+    embassyName: 'Ambassade de France',
+    embassyPageUrl: 'https://example.test/ambassade',
+    excerpt: 'Extrait',
+    rules: [{ ruleKey: 'visa', label: 'Section visa modifiée' }],
+  });
+  const path = new URL(opened.acknowledgementUrl).pathname;
+
+  const preview = await fetch(`${baseUrl}${path}`);
+  assert.equal(preview.status, 200);
+  assert.match(await preview.text(), /Acquitter l’alerte/);
+  assert.equal(service.repositories.episodes.getById(opened.episode.id).status, 'open');
+
+  const acknowledged = await fetch(`${baseUrl}${path}`, { method: 'POST' });
+  assert.equal(acknowledged.status, 200);
+  assert.equal(service.repositories.episodes.getById(opened.episode.id).status, 'acknowledged');
+  assert.equal(typeof service.ackTokenSigner.secret, 'string');
+});
+
 test('settings and schema survive a service restart', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'ambassade-alerts-restart-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
