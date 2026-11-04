@@ -24,7 +24,12 @@ from .db import Database
 from .http import HTTPError, Request, Response
 from .logging_config import get_logger
 from .mailer import EmailProvider
-from .repositories import DeliveryAttemptRepository, EpisodeRepository
+from .repositories import (
+    DeliveryAttemptRepository,
+    EpisodeRepository,
+    SmsChannelStateRepository,
+)
+from .sms_channel import SmsChannelService, UNSET as SMS_UNSET
 from .util import format_timestamp, utcnow
 from .views import (
     deliveries_page,
@@ -382,6 +387,8 @@ def create_app(
     deliveries: DeliveryAttemptRepository | None = None,
     alerts: AlertService | None = None,
     email_provider: EmailProvider | None = UNSET,  # type: ignore[assignment]
+    sms: SmsChannelService | None = None,
+    sms_provider=SMS_UNSET,
     logger=None,
     clock: Callable[[], datetime] = utcnow,
     extra_routes: Iterable[tuple[str, str, Handler]] = (),
@@ -395,11 +402,21 @@ def create_app(
     if deliveries is None:
         deliveries = DeliveryAttemptRepository(database, now=clock)
     if alerts is None:
+        if sms is None:
+            sms = SmsChannelService(
+                config,
+                deliveries,
+                SmsChannelStateRepository(database, now=clock),
+                provider=sms_provider,
+                logger=logger,
+                clock=clock,
+            )
         alerts = AlertService(
             config,
             episodes,
             deliveries,
             provider=email_provider,
+            sms=sms,
             logger=logger,
             clock=clock,
         )

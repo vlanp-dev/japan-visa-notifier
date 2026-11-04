@@ -27,6 +27,7 @@ from .repositories import (
     Episode,
     EpisodeRepository,
 )
+from .sms_channel import SmsChannelService
 from .util import format_timestamp, mask_recipient, sanitize_error, utcnow
 
 UNSET = object()
@@ -51,6 +52,7 @@ class AlertService:
         deliveries: DeliveryAttemptRepository,
         *,
         provider: EmailProvider | None = UNSET,  # type: ignore[assignment]
+        sms: SmsChannelService | None = None,
         logger=None,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
@@ -60,6 +62,7 @@ class AlertService:
         if provider is UNSET:
             provider = build_email_provider(config)
         self.provider = provider
+        self.sms = sms
         self._logger = logger or get_logger("email")
         self._clock = clock
 
@@ -80,6 +83,7 @@ class AlertService:
             detected_at=detected_at,
         )
         self.send_episode_alert(episode)
+        self._send_sms_alert(episode)
         return episode
 
     def get_episode(self, episode_id: str) -> Episode | None:
@@ -97,6 +101,23 @@ class AlertService:
         """Resend the email only; this never touches another channel."""
 
         return self._deliver(episode, kind="resend")
+
+    def _send_sms_alert(self, episode: Episode) -> None:
+        """Attempt the optional SMS alert after the email attempt is stored.
+
+        The SMS channel is fully self-contained: it skips itself when it is
+        unconfigured or unverified, and every failure is caught here so no SMS
+        outcome can change the email attempt, block resend or fail the request.
+        """
+
+        if self.sms is None:
+            return
+        try:
+            self.sms.send_episode_alert(episode)
+        except Exception:  # boundary: the optional channel must never leak
+            self._logger.exception(
+                "SMS alert raised at the boundary for episode %s", episode.id
+            )
 
     def _deliver(self, episode: Episode, *, kind: str) -> SendResult:
         started = time.perf_counter()
