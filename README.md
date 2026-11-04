@@ -123,6 +123,26 @@ three states.
   `MAX_BODY_BYTES`, and unexpected errors return a generic 500 without internal
   details.
 
+## Operator interface
+
+The operator interface is served in French and protected by HTTP Basic auth:
+
+- `GET /` — dashboard: configuration completeness, failure banner, episodes with
+  their signed acknowledgement-page links, and the persisted email attempts.
+- `GET /settings`, `POST /settings` — sender, recipient and sending subdomain,
+  plus a write-only API key field. Blank fields keep the stored value and the key
+  is never sent back to the browser.
+- `GET /episodes/new`, `POST /episodes` — declare one episode with several rules
+  in a single submission. The episode is persisted, then one email attempt is
+  recorded for it.
+- `POST /email/test` — send the separate configuration-test email.
+
+All state-changing forms include the CSRF double-submit token. The dashboard
+labels persisted attempts exactly `Accepté par le fournisseur`, `Refusé` or
+`Non tenté`, alongside the stored provider reason, and shows the failure banner
+only when at least two refusals have been recorded since the last acceptance.
+No screen makes a deliverability, opening or click claim.
+
 ## Acknowledgement links
 
 Opening an episode stores a random nonce and an expiry (seven days) on the

@@ -10,6 +10,7 @@ import { createApp } from './http/app.js';
 import { createLogger } from './logger.js';
 import { createRepositories } from './repositories/index.js';
 import { EpisodeService } from './services/episode-service.js';
+import { registerOperatorUiRoutes } from './ui/routes.js';
 
 /**
  * Wire configuration, logging, SQLite and the HTTP application into a service
@@ -64,7 +65,16 @@ export function createService({
     logger: log,
     db,
     repositories,
-    registerRoutes: (httpApp) => registerAckRoutes(httpApp, { episodeService: episodes }),
+    registerRoutes: (httpApp) => {
+      registerAckRoutes(httpApp, { episodeService: episodes });
+      registerOperatorUiRoutes(httpApp, {
+        repositories,
+        episodeService: episodes,
+        emailService: mailer,
+        emailSettings,
+        tokenSigner,
+      });
+    },
   });
   const server = createServer((req, res) => {
     app.handle(req, res).catch((error) => {
