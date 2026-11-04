@@ -14,6 +14,12 @@ from urllib.parse import quote
 from . import __version__
 from .config import Config
 from .repositories import DeliveryAttempt, Episode
+from .sms_channel import (
+    SMS_STATE_LABELS,
+    SMS_STATE_UNCONFIGURED,
+    SMS_STATE_VERIFIED,
+    SmsChannelStatus,
+)
 
 
 def escape(value: Any) -> str:
@@ -90,6 +96,9 @@ def health_page(
     attempt_count: int,
     episodes: Iterable[Episode],
     attempts: Iterable[DeliveryAttempt],
+    sms_status: SmsChannelStatus | None = None,
+    csrf_token: str = "",
+    notice: str = "",
 ) -> str:
     status_text = "Service opérationnel" if database_ok else "Service dégradé"
     status_class = "" if database_ok else " bad"
@@ -101,6 +110,18 @@ def health_page(
     else:
         email_text = "Non configuré"
         email_class = "bad"
+
+    sms_card, sms_section = _sms_view(
+        sms_status=sms_status, csrf_token=csrf_token
+    )
+
+    notice_banner = ""
+    notice_data = _SMS_NOTICES.get(notice)
+    if notice_data:
+        text, css_class = notice_data
+        notice_banner = (
+            f'<div class="banner{css_class}"><strong>{escape(text)}</strong></div>'
+        )
 
     episode_rows = list(episodes)
     attempt_rows = list(attempts)
@@ -116,13 +137,16 @@ def health_page(
         attempt_table = '<p class="empty">Aucune tentative de livraison enregistrée.</p>'
 
     body = f"""
+{notice_banner}
 <div class="banner{status_class}"><strong>{escape(status_text)}</strong></div>
 <div class="cards">
   <div class="card"><h2>Base de données</h2><p class="{database_class}">{escape(database_text)}</p></div>
   <div class="card"><h2>Canal email</h2><p class="{escape(email_class)}">{escape(email_text)}</p></div>
+  {sms_card}
   <div class="card"><h2>Épisodes</h2><p>{episode_count}</p></div>
   <div class="card"><h2>Tentatives de livraison</h2><p>{attempt_count}</p></div>
 </div>
+{sms_section}
 <section>
   <h2>Derniers épisodes</h2>
   {episode_table}
@@ -135,6 +159,79 @@ def health_page(
     return layout(
         title="État du service", body=body, service_name=config.service_name
     )
+
+
+def _sms_view(
+    *, sms_status: SmsChannelStatus | None, csrf_token: str
+) -> tuple[str, str]:
+    """Render the SMS status card and its explicit test action."""
+
+    if sms_status is None:
+        label = SMS_STATE_LABELS[SMS_STATE_UNCONFIGURED]
+        label_class = "bad"
+        provider = "—"
+        recipient = "—"
+        last_test = "Aucun test effectué"
+        last_error = "—"
+        configuration = ""
+    else:
+        label = sms_status.label
+        label_class = "ok" if sms_status.state == SMS_STATE_VERIFIED else "bad"
+        provider = sms_status.provider or "—"
+        recipient = sms_status.recipient_masked or "—"
+        last_test = _sms_last_test(sms_status)
+        last_error = _sms_last_error(sms_status)
+        configuration = (
+            f'<p class="empty">{escape(sms_status.configuration_error)}</p>'
+            if sms_status.configuration_error
+            else ""
+        )
+
+    card = (
+        '<div class="card"><h2>Canal SMS</h2>'
+        f'<p class="{label_class}">{escape(label)}</p></div>'
+    )
+    section = f"""
+<section>
+  <h2>Canal SMS</h2>
+  <div class="card">
+    <h2>État du canal SMS</h2>
+    <p class="{label_class}">{escape(label)}</p>
+    <p>Fournisseur : <code>{escape(provider)}</code></p>
+    <p>Destinataire : <code>{escape(recipient)}</code></p>
+    <p>Dernier test : {escape(last_test)}</p>
+    <p>Dernière erreur : {escape(last_error)}</p>
+    {configuration}
+  </div>
+  <p>Le canal SMS est facultatif. Un test réussi vérifie la configuration et
+     active l'envoi lors des prochains épisodes ; le canal email reste
+     obligatoire et n'est jamais dégradé par le SMS.</p>
+  <form method="post" action="/sms/test">
+    <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+    <button type="submit">Envoyer un SMS de test</button>
+  </form>
+</section>
+"""
+    return card, section
+
+
+def _sms_last_test(status: SmsChannelStatus) -> str:
+    if not status.last_test_status:
+        return "Aucun test effectué"
+    outcome = _SMS_TEST_RESULTS.get(
+        status.last_test_status, status.last_test_status
+    )
+    if status.last_test_at:
+        return f"{outcome} le {status.last_test_at}"
+    return outcome
+
+
+def _sms_last_error(status: SmsChannelStatus) -> str:
+    if not status.last_error:
+        return "—"
+    if status.last_error_at:
+        return f"{status.last_error} ({status.last_error_at})"
+    return status.last_error
 
 
 def _episode_table(episodes: Iterable[Episode]) -> str:
@@ -335,6 +432,29 @@ _NOTICES: dict[str, tuple[str, str]] = {
     "resent_failed": (
         "La réémission email a échoué ; l'épisode reste consultable et "
         "peut être réémis à nouveau.",
+        " bad",
+    ),
+}
+
+_SMS_TEST_RESULTS: dict[str, str] = {
+    "sent": "Réussi",
+    "failed": "Échec",
+}
+
+_SMS_NOTICES: dict[str, tuple[str, str]] = {
+    "sms_test_sent": (
+        "Test SMS réussi : la configuration du fournisseur est vérifiée et "
+        "le canal est actif.",
+        "",
+    ),
+    "sms_test_failed": (
+        "Test SMS échoué : la configuration reste inactive ou en échec. "
+        "Le détail est affiché dans l'état du canal SMS.",
+        " bad",
+    ),
+    "sms_test_refused": (
+        "Test SMS refusé : le canal n'est pas configuré ou sa configuration "
+        "est invalide. Aucun message n'a été envoyé.",
         " bad",
     ),
 }

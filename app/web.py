@@ -29,7 +29,11 @@ from .repositories import (
     EpisodeRepository,
     SmsChannelStateRepository,
 )
-from .sms_channel import SmsChannelService, UNSET as SMS_UNSET
+from .sms_channel import (
+    SmsChannelService,
+    SmsChannelStatus,
+    UNSET as SMS_UNSET,
+)
 from .util import format_timestamp, utcnow
 from .views import (
     deliveries_page,
@@ -80,6 +84,7 @@ class Application:
         deliveries: DeliveryAttemptRepository,
         alerts: AlertService,
         *,
+        sms: SmsChannelService | None = None,
         logger=None,
     ) -> None:
         self.config = config
@@ -87,12 +92,14 @@ class Application:
         self.episodes = episodes
         self.deliveries = deliveries
         self.alerts = alerts
+        self.sms = sms if sms is not None else getattr(alerts, "sms", None)
         self.csrf = CsrfProtector(config.secret)
         self._logger = logger or get_logger("web")
         self._routes: list[Route] = []
         self.add_route("GET", "/", self._health_page)
         self.add_route("GET", "/health", self._health_json)
         self.add_route("GET", "/healthz", self._health_json)
+        self.add_route("POST", "/sms/test", self._test_sms)
         self.add_route("GET", "/episodes/new", self._new_episode)
         self.add_route("POST", "/episodes", self._create_episode)
         self.add_route("GET", "/episodes/{episode_id}", self._episode_detail)
@@ -257,8 +264,39 @@ class Application:
             attempt_count=attempt_count,
             episodes=episodes,
             attempts=attempts,
+            sms_status=self._sms_status(),
+            csrf_token=self._token(request),
+            notice=request.query_one("notice"),
         )
         return Response.html(markup)
+
+    def _test_sms(self, request: Request) -> Response:
+        """Run an explicit operator-triggered test of the SMS configuration."""
+
+        notice = "sms_test_failed"
+        if self.sms is None:
+            notice = "sms_test_refused"
+        else:
+            try:
+                status = self.sms.status()
+                refused = status.configuration_error is not None
+                result = self.sms.send_test()
+                if result.sent:
+                    notice = "sms_test_sent"
+                elif refused:
+                    notice = "sms_test_refused"
+            except Exception:  # boundary: the test page must always answer
+                self._logger.exception("SMS test action failed")
+        return Response.redirect(f"/?notice={notice}")
+
+    def _sms_status(self) -> SmsChannelStatus | None:
+        if self.sms is None:
+            return None
+        try:
+            return self.sms.status()
+        except Exception:
+            self._logger.exception("Cannot read SMS channel status")
+            return None
 
     def _health_json(self, request: Request) -> Response:
         database_ok = self._database_ok()
@@ -403,13 +441,8 @@ def create_app(
         deliveries = DeliveryAttemptRepository(database, now=clock)
     if alerts is None:
         if sms is None:
-            sms = SmsChannelService(
-                config,
-                deliveries,
-                SmsChannelStateRepository(database, now=clock),
-                provider=sms_provider,
-                logger=logger,
-                clock=clock,
+            sms = _build_sms_channel(
+                config, deliveries, database, sms_provider, logger, clock
             )
         alerts = AlertService(
             config,
@@ -420,17 +453,43 @@ def create_app(
             logger=logger,
             clock=clock,
         )
+    else:
+        if sms is None:
+            sms = getattr(alerts, "sms", None)
+        if sms is None:
+            sms = _build_sms_channel(
+                config, deliveries, database, sms_provider, logger, clock
+            )
     app = Application(
         config,
         database,
         episodes,
         deliveries,
         alerts,
+        sms=sms,
         logger=logger,
     )
     for method, pattern, handler in extra_routes:
         app.add_route(method, pattern, handler)
     return app
+
+
+def _build_sms_channel(
+    config: Config,
+    deliveries: DeliveryAttemptRepository,
+    database: Database,
+    sms_provider,
+    logger,
+    clock: Callable[[], datetime],
+) -> SmsChannelService:
+    return SmsChannelService(
+        config,
+        deliveries,
+        SmsChannelStateRepository(database, now=clock),
+        provider=sms_provider,
+        logger=logger,
+        clock=clock,
+    )
 
 
 def _specificity(pattern: str) -> int:
