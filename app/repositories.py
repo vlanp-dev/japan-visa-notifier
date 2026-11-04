@@ -1,4 +1,4 @@
-"""Repositories for episodes and delivery attempts.
+"""Repositories for episodes, delivery attempts and SMS channel state.
 
 Repositories are the only place that writes to SQLite. They validate their
 inputs (including URLs that will later appear in email and SMS messages) and
@@ -51,6 +51,22 @@ class DeliveryAttempt:
     duration_ms: int | None
     error: str | None
     created_at: str
+
+
+@dataclass(frozen=True)
+class SmsChannelState:
+    """The persisted verification and last outcomes of the SMS channel."""
+
+    fingerprint: str
+    verified_at: str | None
+    failing_since: str | None
+    last_test_at: str | None
+    last_test_status: str | None
+    last_test_error: str | None
+    last_alert_at: str | None
+    last_alert_status: str | None
+    last_alert_error: str | None
+    updated_at: str
 
 
 def _limit(value: int, maximum: int = 200) -> int:
@@ -287,6 +303,166 @@ class DeliveryAttemptRepository:
         return int(row[0])
 
 
+class SmsChannelStateRepository:
+    """Persist the single SMS channel state row.
+
+    The row is keyed to a configuration fingerprint. Whenever the fingerprint
+    changes, verification and previous outcomes are cleared before any new
+    result is written, so a stale test can never keep a provider active.
+    """
+
+    ID = 1
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        now: Callable[[], datetime] = utcnow,
+    ) -> None:
+        self.database = database
+        self._now = now
+
+    def get(self) -> SmsChannelState | None:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM sms_channel_state WHERE id = ?", (self.ID,)
+            ).fetchone()
+        return _sms_state_from_row(row) if row else None
+
+    def ensure(self, fingerprint: str) -> SmsChannelState:
+        """Return the row for ``fingerprint``, resetting a stale one."""
+
+        checked = _fingerprint(fingerprint)
+        with self.database.connection() as connection:
+            row = self._ensure(connection, checked)
+        return row
+
+    def record_test(
+        self,
+        *,
+        fingerprint: str,
+        status: str,
+        error: str | None = None,
+        at: datetime | str | None = None,
+    ) -> SmsChannelState:
+        """Store an explicit test outcome.
+
+        A successful test is what verifies the channel. A failed test clears
+        verification: an operator must run a successful test again.
+        """
+
+        checked = _fingerprint(fingerprint)
+        outcome = _choice(status, "status", STATUSES)
+        moment = _timestamp(at or self._now())
+        sanitized = sanitize_error(error) or None
+        with self.database.connection() as connection:
+            self._ensure(connection, checked)
+            if outcome == "sent":
+                connection.execute(
+                    """
+                    UPDATE sms_channel_state
+                    SET verified_at = ?, failing_since = NULL,
+                        last_test_at = ?, last_test_status = 'sent',
+                        last_test_error = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (moment, moment, moment, self.ID),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sms_channel_state
+                    SET verified_at = NULL, failing_since = NULL,
+                        last_test_at = ?, last_test_status = 'failed',
+                        last_test_error = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (moment, sanitized, moment, self.ID),
+                )
+            row = connection.execute(
+                "SELECT * FROM sms_channel_state WHERE id = ?", (self.ID,)
+            ).fetchone()
+        return _sms_state_from_row(row)
+
+    def record_alert(
+        self,
+        *,
+        fingerprint: str,
+        status: str,
+        error: str | None = None,
+        at: datetime | str | None = None,
+    ) -> SmsChannelState:
+        """Store a real episode alert outcome.
+
+        A failed real alert must not deactivate the channel: it stays active
+        but failing until a successful test or real alert clears the failure.
+        """
+
+        checked = _fingerprint(fingerprint)
+        outcome = _choice(status, "status", STATUSES)
+        moment = _timestamp(at or self._now())
+        sanitized = sanitize_error(error) or None
+        with self.database.connection() as connection:
+            self._ensure(connection, checked)
+            if outcome == "sent":
+                connection.execute(
+                    """
+                    UPDATE sms_channel_state
+                    SET verified_at = ?, failing_since = NULL,
+                        last_alert_at = ?, last_alert_status = 'sent',
+                        last_alert_error = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (moment, moment, moment, self.ID),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sms_channel_state
+                    SET failing_since = ?, last_alert_at = ?,
+                        last_alert_status = 'failed', last_alert_error = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (moment, moment, sanitized, moment, self.ID),
+                )
+            row = connection.execute(
+                "SELECT * FROM sms_channel_state WHERE id = ?", (self.ID,)
+            ).fetchone()
+        return _sms_state_from_row(row)
+
+    def _ensure(self, connection, fingerprint: str) -> SmsChannelState:
+        row = connection.execute(
+            "SELECT * FROM sms_channel_state WHERE id = ?", (self.ID,)
+        ).fetchone()
+        moment = format_timestamp(self._now())
+        if row is None:
+            connection.execute(
+                """
+                INSERT INTO sms_channel_state (id, fingerprint, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (self.ID, fingerprint, moment),
+            )
+        elif row["fingerprint"] != fingerprint:
+            connection.execute(
+                """
+                UPDATE sms_channel_state
+                SET fingerprint = ?, verified_at = NULL, failing_since = NULL,
+                    last_test_at = NULL, last_test_status = NULL,
+                    last_test_error = NULL, last_alert_at = NULL,
+                    last_alert_status = NULL, last_alert_error = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (fingerprint, moment, self.ID),
+            )
+        row = connection.execute(
+            "SELECT * FROM sms_channel_state WHERE id = ?", (self.ID,)
+        ).fetchone()
+        return _sms_state_from_row(row)
+
+
 def _episode_from_row(row) -> Episode:
     return Episode(
         id=row["id"],
@@ -313,6 +489,32 @@ def _attempt_from_row(row) -> DeliveryAttempt:
         error=row["error"],
         created_at=row["created_at"],
     )
+
+
+def _sms_state_from_row(row) -> SmsChannelState:
+    return SmsChannelState(
+        fingerprint=row["fingerprint"],
+        verified_at=row["verified_at"],
+        failing_since=row["failing_since"],
+        last_test_at=row["last_test_at"],
+        last_test_status=row["last_test_status"],
+        last_test_error=row["last_test_error"],
+        last_alert_at=row["last_alert_at"],
+        last_alert_status=row["last_alert_status"],
+        last_alert_error=row["last_alert_error"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _fingerprint(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("fingerprint must be a string")
+    result = value.strip()
+    if not result:
+        raise ValueError("fingerprint must not be empty")
+    if len(result) > 128:
+        raise ValueError("fingerprint is too long (maximum 128)")
+    return result
 
 
 def _required_text(value: str, name: str, max_length: int) -> str:

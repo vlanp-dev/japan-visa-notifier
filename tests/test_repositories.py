@@ -34,6 +34,7 @@ class RepositoryTests(unittest.TestCase):
             }
         self.assertIn("episodes", tables)
         self.assertIn("delivery_attempts", tables)
+        self.assertIn("sms_channel_state", tables)
 
     def test_create_get_list_and_acknowledge_episode(self) -> None:
         moment = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)

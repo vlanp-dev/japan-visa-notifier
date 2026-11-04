@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -46,6 +46,27 @@ CREATE INDEX IF NOT EXISTS idx_delivery_attempts_created
     ON delivery_attempts (created_at);
 CREATE INDEX IF NOT EXISTS idx_episodes_created
     ON episodes (created_at);
+
+-- A single row holds the verification of the optional SMS channel. The
+-- fingerprint identifies the provider configuration it was verified against;
+-- a change invalidates the verification instead of silently reusing it.
+CREATE TABLE IF NOT EXISTS sms_channel_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    fingerprint TEXT NOT NULL DEFAULT '',
+    verified_at TEXT,
+    failing_since TEXT,
+    last_test_at TEXT,
+    last_test_status TEXT CHECK (
+        last_test_status IS NULL OR last_test_status IN ('sent', 'failed')
+    ),
+    last_test_error TEXT,
+    last_alert_at TEXT,
+    last_alert_status TEXT CHECK (
+        last_alert_status IS NULL OR last_alert_status IN ('sent', 'failed')
+    ),
+    last_alert_error TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 
