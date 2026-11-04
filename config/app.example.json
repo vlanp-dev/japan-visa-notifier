@@ -1,0 +1,27 @@
+{
+  "service": {
+    "name": "Alertes épisodes",
+    "environment": "development"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "secret": "remplacer-par-un-secret-aleatoire-de-32-caracteres"
+  },
+  "database": {
+    "path": "var/alerts.sqlite3"
+  },
+  "logging": {
+    "level": "INFO"
+  },
+  "email": {
+    "smtp_host": "smtp.example.org",
+    "smtp_port": 587,
+    "username": "alertes@example.org",
+    "password": "remplacer-par-le-mot-de-passe-smtp",
+    "sender": "alertes@example.org",
+    "recipient": "operateur@example.org",
+    "use_starttls": true,
+    "timeout_seconds": 10.0
+  }
+}
