@@ -17,10 +17,11 @@ global `fetch`).
 
 ```sh
 npm start    # start the HTTP service
-npm test     # run the node:test suite with temporary databases
+npm test     # run the node:test suite, including offline acceptance tests
 ```
 
-There is no build step and no `npm install` is required.
+The suite uses temporary databases and an injected fake Resend `fetch`; it never
+contacts the provider. There is no build step and no `npm install` is required.
 
 ## Configuration
 
@@ -143,6 +144,70 @@ labels persisted attempts exactly `Accepté par le fournisseur`, `Refusé` or
 only when at least two refusals have been recorded since the last acceptance.
 No screen makes a deliverability, opening or click claim.
 
+## Operator setup
+
+1. **Start the service with its environment.** Set `APP_ENV=production`, the
+   listening `HOST`/`PORT`, the `DATA_DIR` holding the database and private key
+   file, the public `PUBLIC_BASE_URL` used in emailed acknowledgement links, and
+   `OPERATOR_USERNAME`/`OPERATOR_PASSWORD` for HTTP Basic auth. Production
+   refuses to start if the public URL or operator credentials are missing or
+   weak. `ACK_TOKEN_SECRET` is optional: when unset, a random secret is generated
+   once and stored in the database so acknowledgement links survive restarts.
+
+   ```sh
+   APP_ENV=production \
+   HOST=127.0.0.1 PORT=3000 \
+   PUBLIC_BASE_URL=https://alertes.example.org \
+   DATA_DIR=/var/lib/ambassade-alerts \
+   OPERATOR_USERNAME=operateur OPERATOR_PASSWORD='choose-a-long-password' \
+   npm start
+   ```
+
+2. **Prepare the sending subdomain in Resend.** Create the subdomain of
+   `vlanp.com` used for sending (for example `alertes.vlanp.com`) and publish its
+   DNS records (SPF, DKIM and DMARC) in the operator's DNS zone. This is the
+   operator's responsibility and outside this service.
+
+3. **Configure email through the interface.** Sign in with Basic auth, open
+   `/settings`, and fill in the sender (for example
+   `alertes@alertes.vlanp.com`), the single recipient, the sending subdomain
+   (`alertes`, without the domain) and the Resend API key. Saving writes the key
+   atomically to `<DATA_DIR>/resend-api-key` (or `RESEND_API_KEY_FILE`) with mode
+   `0600`, outside SQLite. The key is re-read on every send, never rendered back
+   to the browser and never written to logs. Leave a field blank to keep its
+   stored value.
+
+4. **Send a configuration test.** The dashboard's “Envoyer un email de test”
+   action records a separate `test` attempt. A valid configuration normally
+   shows `Accepté par le fournisseur` with the provider message id.
+
+5. **Declare episodes.** Open `/episodes/new` and submit every rule triggered at
+   the same control in one form. The service persists one episode and makes
+   exactly one email attempt for it, however many rules are listed.
+
+## Manual live checks
+
+The automated suite is offline: it injects a fake Resend `fetch` and never
+contacts the provider. The following checks are manual and use the operator's
+real Resend account.
+
+- **Valid key.** Save a valid sender, recipient, subdomain and key, then send a
+  test email. The dashboard must show `Accepté par le fournisseur` and the
+  provider message id. This only means Resend accepted the request; the service
+  cannot and does not claim delivery, opening or clicks.
+- **Invalid key.** Temporarily save a deliberately invalid but well-formed key
+  (for example `re_invalid_key`). Send a test email: the state must be `Refusé`
+  with the provider's reason visible, for example an HTTP 401/`validation_error`
+  message, and the service must stay reachable. A second failure raises the
+  “Échecs d’envoi répétés” banner. Restore the valid key and send another test;
+  an acceptance clears the banner.
+- **One attempt with two rules.** Declare one episode containing two rules.
+  Confirm a single row in “Tentatives d’envoi” and a single submission in the
+  Resend activity; no second email is sent for the second rule.
+- **Missing configuration.** Remove the key file or leave a required setting
+  empty, then declare an episode. The state must be `Non tenté` and no provider
+  request is made; the reason lists the missing fields.
+
 ## Acknowledgement links
 
 Opening an episode stores a random nonce and an expiry (seven days) on the
@@ -185,7 +250,14 @@ private key file.
 
 ## Email provider constraints
 
-Resend's Free plan limits, verified on the stored pricing page
-(https://resend.com/pricing.md), are 100 emails per day and 3,000 per month. The
+Resend's Free plan limits, as verified on 2026-11-04 on the stored pricing page
+(https://resend.com/pricing.md), are **100 emails per day** and **3,000 per
+month**. They are not assumed from another source; re-check that stored page
+before relying on a different figure.
+
+The service sends at most one alert email per opened episode, plus one email per
+manual configuration test. It never retries a refused send automatically and
+never batches a digest, so the volume stays far below the daily ceiling. The
 operator owns the `vlanp.com` sending subdomain and its DNS records (SPF, DKIM,
-DMARC). No deliverability, open or click tracking is available or claimed.
+DMARC). There is no provider webhook and no deliverability, open or click
+tracking; the service records only the provider's accepted/refused response.
