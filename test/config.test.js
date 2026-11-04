@@ -15,6 +15,7 @@ test('development has safe, usable defaults', () => {
   assert.equal(config.port, 3000);
   assert.equal(config.dataDir, '/tmp/example-project/data');
   assert.equal(config.databasePath, '/tmp/example-project/data/alerts.sqlite');
+  assert.equal(config.resendApiKeyPath, '/tmp/example-project/data/resend-api-key');
   assert.equal(config.publicBaseUrl, 'http://127.0.0.1:3000');
   assert.equal(config.operator.username, DEVELOPMENT_OPERATOR_USERNAME);
   assert.equal(config.operator.password, DEVELOPMENT_OPERATOR_PASSWORD);
@@ -32,6 +33,7 @@ test('explicit environment values are honored and normalized', () => {
       PORT: '8443',
       DATA_DIR: '/srv/ambassade',
       DATABASE_PATH: 'state/alerts.sqlite',
+      RESEND_API_KEY_FILE: 'secrets/resend-key',
       PUBLIC_BASE_URL: 'https://alerts.vlanp.com/',
       OPERATOR_USERNAME: 'operator-prod',
       OPERATOR_PASSWORD: 'a-long-production-password',
@@ -46,6 +48,7 @@ test('explicit environment values are honored and normalized', () => {
   assert.equal(config.port, 8443);
   assert.equal(config.dataDir, '/srv/ambassade');
   assert.equal(config.databasePath, '/srv/ambassade/state/alerts.sqlite');
+  assert.equal(config.resendApiKeyPath, '/srv/ambassade/secrets/resend-key');
   assert.equal(config.publicBaseUrl, 'https://alerts.vlanp.com');
   assert.equal(config.secureCookies, true);
   assert.equal(config.logLevel, 'warn');

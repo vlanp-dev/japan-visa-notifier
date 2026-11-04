@@ -33,6 +33,7 @@ All configuration comes from environment variables.
 | `PORT` | `3000` | TCP port. `0` asks the operating system for an ephemeral port. |
 | `DATA_DIR` | `./data` | Directory holding the SQLite database. Created automatically. |
 | `DATABASE_PATH` | `<DATA_DIR>/alerts.sqlite` | Optional database file path. Relative paths resolve under `DATA_DIR`; `:memory:` is accepted. |
+| `RESEND_API_KEY_FILE` | `<DATA_DIR>/resend-api-key` | Optional path of the `0600` file holding the Resend API key. Relative paths resolve under `DATA_DIR`. |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:<PORT>` | Public origin used to build absolute links (acknowledgement, embassy page). Required in production and must be `http` or `https`. |
 | `OPERATOR_USERNAME` | `operator` in development/test | HTTP Basic auth user. Required in production. |
 | `OPERATOR_PASSWORD` | `development-password` in development/test | HTTP Basic auth password. Required in production (at least 12 characters). |
@@ -45,8 +46,32 @@ missing, use the development defaults, are too short, or when
 `PUBLIC_BASE_URL` is missing. The development defaults exist only so that a local
 service can start without configuration.
 
-The service never stores the Resend API key in the database. A later task writes
-it to a `0600` file; this foundation does not require it.
+The service never stores the Resend API key in the database. The operator sets
+it through the settings flow; the value is written atomically to a file with
+mode `0600` (by default `<DATA_DIR>/resend-api-key`) and re-read on every send.
+Absent or blank form fields keep the stored value, so the masked key can be left
+untouched. A missing or unreadable key is reported as an incomplete
+configuration and never stops the service.
+
+## Email configuration and composition
+
+Email settings are stored in the `settings` table:
+
+- `email.sender` — the single `From` address.
+- `email.recipient` — the single operator address (no recipient lists).
+- `email.sending_subdomain` — the sending subdomain of `vlanp.com`, for example
+  `alertes`. The operator owns that subdomain and its DNS records.
+
+`EmailSettingsService.getConfigurationState()` reports the missing fields
+without contacting Resend. It returns the non-secret settings, whether the API
+key file is present, and French labels for every missing field. The key itself
+is never returned, rendered in HTML or written to logs or error messages.
+
+`composeAlertEmail()` builds a French message containing every triggered rule,
+the modified excerpt, the embassy page URL and the signed acknowledgement URL.
+`composeTestEmail()` builds a separate French configuration-test message. All
+interpolated values are HTML-escaped, URLs are restricted to absolute `http(s)`
+URLs, and the messages make no deliverability, opening or click claim.
 
 ## HTTP surface
 
@@ -80,8 +105,8 @@ comes from `ACK_TOKEN_SECRET` or from `app_secrets` when that variable is unset.
 SQLite is opened through `node:sqlite` with foreign keys enabled, WAL mode and
 idempotent migrations. The schema contains:
 
-- `settings` — key/value operator settings (sender, recipient, sending
-  subdomain in later tasks).
+- `settings` — key/value operator settings, including the email sender,
+  recipient and sending subdomain.
 - `app_secrets` — internal secrets such as the acknowledgement signing secret.
 - `episodes` — opened alert episodes, their acknowledgement state, and the
   per-episode nonce plus expiry that bind an acknowledgement link to the
@@ -91,14 +116,15 @@ idempotent migrations. The schema contains:
   `not_attempted`), plus independent test sends; a partial unique index enforces
   a single attempt per episode.
 
-The API key is deliberately absent from this schema.
+The API key is deliberately absent from this schema; it lives only in the
+private key file.
 
 ## Security notes
 
 - Serve the service behind TLS (reverse proxy) in production; Basic auth sends
   credentials with every request.
-- The `data/` directory contains the database and, in later tasks, the Resend
-  API key file. Restrict its permissions to the service account.
+- The `data/` directory contains the database and the `0600` Resend API key
+  file. Restrict the directory to the service account.
 - Logs are JSON lines and redact credential-like keys and known secret values.
 
 ## Email provider constraints

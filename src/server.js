@@ -3,6 +3,7 @@ import { createAckTokenSigner } from './ack/ack-token-signer.js';
 import { registerAckRoutes } from './ack/routes.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
+import { EmailSettingsService } from './email/settings.js';
 import { createApp } from './http/app.js';
 import { createLogger } from './logger.js';
 import { createRepositories } from './repositories/index.js';
@@ -16,6 +17,10 @@ export function createService({ env = process.env, logger, ackTokenSigner, episo
   const config = loadConfig(env);
   const db = openDatabase(config.databasePath);
   const repositories = createRepositories(db);
+  const emailSettings = new EmailSettingsService({
+    repositories,
+    apiKeyPath: config.resendApiKeyPath,
+  });
   const tokenSigner =
     ackTokenSigner ??
     createAckTokenSigner({
@@ -64,6 +69,7 @@ export function createService({ env = process.env, logger, ackTokenSigner, episo
     repositories,
     ackTokenSigner: tokenSigner,
     episodeService: episodes,
+    emailSettings,
     app,
     server,
     listen() {

@@ -91,6 +91,10 @@ export function loadConfig(env = process.env, { cwd = process.cwd() } = {}) {
   const rawDatabasePath = readOptionalString(env, 'DATABASE_PATH') ?? 'alerts.sqlite';
   const databasePath =
     rawDatabasePath === ':memory:' ? ':memory:' : path.resolve(dataDir, rawDatabasePath);
+  const resendApiKeyPath = path.resolve(
+    dataDir,
+    readOptionalString(env, 'RESEND_API_KEY_FILE') ?? 'resend-api-key',
+  );
 
   const devFallbackUsername = isProduction ? undefined : DEVELOPMENT_OPERATOR_USERNAME;
   const devFallbackPassword = isProduction ? undefined : DEVELOPMENT_OPERATOR_PASSWORD;
@@ -136,6 +140,7 @@ export function loadConfig(env = process.env, { cwd = process.cwd() } = {}) {
     port,
     dataDir,
     databasePath,
+    resendApiKeyPath,
     publicBaseUrl,
     operator: Object.freeze({ username, password }),
     ackTokenSecret,

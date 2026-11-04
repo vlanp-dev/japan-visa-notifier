@@ -26,6 +26,12 @@ test('the service starts and stays healthy without any email configuration', asy
   assert.equal(service.config.appEnv, 'test');
   assert.equal('email' in service.config, false);
   assert.equal(service.repositories.settings.get('sender'), null);
+  assert.deepEqual(service.emailSettings.getConfigurationState().missingFields, [
+    'sender',
+    'recipient',
+    'sendingSubdomain',
+    'apiKey',
+  ]);
 });
 
 test('the service exposes public signed acknowledgement links', async (t) => {
@@ -71,6 +77,12 @@ test('settings and schema survive a service restart', async (t) => {
   await first.listen();
   first.repositories.settings.set('sender', 'alertes@vlanp.com');
   first.repositories.appSecrets.set('ack', 'stable-secret');
+  first.emailSettings.update({
+    sender: 'alertes@alertes.vlanp.com',
+    recipient: 'operateur@example.test',
+    sendingSubdomain: 'alertes',
+    apiKey: 're_restart_key',
+  });
   await first.close();
 
   const second = createService({ env: serviceEnv(dir) });
@@ -80,4 +92,6 @@ test('settings and schema survive a service restart', async (t) => {
   assert.equal(response.status, 200);
   assert.equal(second.repositories.settings.get('sender'), 'alertes@vlanp.com');
   assert.equal(second.repositories.appSecrets.get('ack'), 'stable-secret');
+  assert.equal(second.emailSettings.readApiKey(), 're_restart_key');
+  assert.equal(second.emailSettings.getConfigurationState().complete, true);
 });
