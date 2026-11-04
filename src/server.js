@@ -3,6 +3,8 @@ import { createAckTokenSigner } from './ack/ack-token-signer.js';
 import { registerAckRoutes } from './ack/routes.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db.js';
+import { EmailService } from './email/email-service.js';
+import { createResendClient } from './email/resend-client.js';
 import { EmailSettingsService } from './email/settings.js';
 import { createApp } from './http/app.js';
 import { createLogger } from './logger.js';
@@ -11,9 +13,18 @@ import { EpisodeService } from './services/episode-service.js';
 
 /**
  * Wire configuration, logging, SQLite and the HTTP application into a service
- * object. Starting the service requires no email configuration whatsoever.
+ * object. Starting the service requires no email configuration whatsoever, and
+ * no provider request is made until an episode is delivered or a test email is
+ * requested.
  */
-export function createService({ env = process.env, logger, ackTokenSigner, episodeService } = {}) {
+export function createService({
+  env = process.env,
+  logger,
+  ackTokenSigner,
+  episodeService,
+  emailService,
+  resendClient,
+} = {}) {
   const config = loadConfig(env);
   const db = openDatabase(config.databasePath);
   const repositories = createRepositories(db);
@@ -39,6 +50,14 @@ export function createService({ env = process.env, logger, ackTokenSigner, episo
     createLogger({
       level: config.logLevel,
       secrets: [config.operator.password, tokenSigner.secret],
+    });
+  const mailer =
+    emailService ??
+    new EmailService({
+      repositories,
+      emailSettings,
+      resendClient: resendClient ?? createResendClient({ logger: log }),
+      logger: log,
     });
   const app = createApp({
     config,
@@ -70,6 +89,7 @@ export function createService({ env = process.env, logger, ackTokenSigner, episo
     ackTokenSigner: tokenSigner,
     episodeService: episodes,
     emailSettings,
+    emailService: mailer,
     app,
     server,
     listen() {

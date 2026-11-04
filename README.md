@@ -2,8 +2,8 @@
 
 Small self-hosted service that watches embassy pages and alerts the operator by
 email when an alert episode opens. Email delivery uses
-[Resend](https://resend.com) later in the delivery path; this foundation starts
-and stays healthy without any email configuration.
+[Resend](https://resend.com) through the delivery path described below; this
+service starts and stays healthy without any email configuration.
 
 The service has **no runtime dependencies**. It runs on Node.js 24 and only uses
 built-in modules (`node:http`, `node:sqlite`, `node:crypto`, `node:test`, and the
@@ -73,6 +73,39 @@ the modified excerpt, the embassy page URL and the signed acknowledgement URL.
 interpolated values are HTML-escaped, URLs are restricted to absolute `http(s)`
 URLs, and the messages make no deliverability, opening or click claim.
 
+## Delivery path and one-attempt guarantee
+
+`EmailService.deliverEpisode()` accepts the result of opening an episode
+(`{ episode, acknowledgementUrl }`) and sends the alert email once. Before any
+provider request it inserts a durable claim in `email_delivery_claims`, keyed by
+the episode id. The claim is committed first, so two rules in one episode, two
+concurrent requests, two service instances over the same database, or a restart
+after the claim cannot produce a second provider request. In-process calls are
+also coalesced by an in-flight map.
+
+The persisted outcome is exactly one of:
+
+- `accepted` — Resend returned a 2xx response and a message id. This means the
+  provider accepted the send; it is not a delivery, opening or click
+  confirmation.
+- `refused` — Resend returned a non-2xx response, or the request failed at the
+  network/timeout level. The reason, including the provider status and name, is
+  stored.
+- `not_attempted` — a required setting or the API key is absent or unreadable.
+  No provider request is made and the reason lists the missing fields.
+
+A claim without a persisted attempt (for example a crash during the provider
+call) is never retried automatically: later calls return an explicit
+indeterminate result with no attempt row and no provider request. Claims and
+attempts cascade when their episode is deleted.
+
+`EmailService.getBannerState()` is computed only from persisted rows: it counts
+`refused` attempts recorded after the most recent `accepted` attempt, ignoring
+`not_attempted`. The banner becomes visible at two refusals, clears on the next
+acceptance, and survives a restart because no counter is kept in memory.
+`EmailService.sendTestEmail()` records a separate `test` attempt with the same
+three states.
+
 ## HTTP surface
 
 - `GET /health` is public, unauthenticated, and returns `{"status":"ok","database":"ok"}`.
@@ -115,6 +148,9 @@ idempotent migrations. The schema contains:
 - `email_attempts` — one attempt per episode (`accepted`, `refused` or
   `not_attempted`), plus independent test sends; a partial unique index enforces
   a single attempt per episode.
+- `email_delivery_claims` — durable pre-send reservation keyed by episode id. A
+  claim is completed in the same transaction as its final attempt; an unfinished
+  claim blocks any further provider request for that episode.
 
 The API key is deliberately absent from this schema; it lives only in the
 private key file.

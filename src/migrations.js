@@ -90,6 +90,27 @@ export const MIGRATIONS = Object.freeze([
         WHERE ack_nonce IS NOT NULL;
     `,
   },
+  {
+    version: 3,
+    name: 'durable email delivery claims',
+    up: `
+      CREATE TABLE email_delivery_claims (
+        episode_id INTEGER PRIMARY KEY REFERENCES episodes (id) ON DELETE CASCADE,
+        claim_token TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        completed_at TEXT,
+        outcome TEXT
+          CHECK (outcome IS NULL OR outcome IN ('accepted', 'refused', 'not_attempted')),
+        CHECK (
+          (completed_at IS NULL AND outcome IS NULL)
+          OR (completed_at IS NOT NULL AND outcome IS NOT NULL)
+        )
+      );
+
+      CREATE INDEX idx_email_delivery_claims_completed_at
+        ON email_delivery_claims (completed_at);
+    `,
+  },
 ]);
 
 export function migrate(db, migrations = MIGRATIONS) {

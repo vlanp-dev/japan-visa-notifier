@@ -46,7 +46,14 @@ test('initial migration creates all foundation tables and indexes', (t) => {
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
     .all()
     .map((row) => row.name);
-  for (const table of ['app_secrets', 'email_attempts', 'episode_rules', 'episodes', 'settings']) {
+  for (const table of [
+    'app_secrets',
+    'email_attempts',
+    'email_delivery_claims',
+    'episode_rules',
+    'episodes',
+    'settings',
+  ]) {
     assert.ok(tables.includes(table), `missing table ${table}`);
   }
   assert.ok(tables.includes('schema_migrations'));
@@ -131,6 +138,27 @@ test('refused and not_attempted attempts require a reason', (t) => {
   assert.throws(() => insertAttempt(db, insertEpisode(db), 'not_attempted'));
   insertAttempt(db, insertEpisode(db), 'refused', 'HTTP 401');
   insertAttempt(db, insertEpisode(db), 'not_attempted', 'clé absente');
+});
+
+test('delivery claims are unique per episode, consistent and cascade with the episode', (t) => {
+  const { db } = tempDatabase(t);
+  const episodeId = insertEpisode(db);
+  const insertClaim = db.prepare(`
+    INSERT INTO email_delivery_claims (episode_id, claim_token, claimed_at)
+    VALUES (?, ?, ?)
+  `);
+  insertClaim.run(episodeId, 'claim-1', NOW);
+  assert.throws(() => insertClaim.run(episodeId, 'claim-2', NOW), /UNIQUE|constraint/i);
+  assert.throws(
+    () =>
+      db
+        .prepare('UPDATE email_delivery_claims SET outcome = ? WHERE episode_id = ?')
+        .run('accepted', episodeId),
+    /constraint/i,
+  );
+
+  db.prepare('DELETE FROM episodes WHERE id = ?').run(episodeId);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM email_delivery_claims').get().count, 0);
 });
 
 test('foreign keys protect episodes and cascade to rules and attempts', (t) => {

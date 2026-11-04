@@ -32,6 +32,8 @@ test('the service starts and stays healthy without any email configuration', asy
     'sendingSubdomain',
     'apiKey',
   ]);
+  assert.equal(typeof service.emailService.deliverEpisode, 'function');
+  assert.equal(service.emailService.getBannerState().visible, false);
 });
 
 test('the service exposes public signed acknowledgement links', async (t) => {
@@ -67,6 +69,44 @@ test('the service exposes public signed acknowledgement links', async (t) => {
   assert.equal(acknowledged.status, 200);
   assert.equal(service.repositories.episodes.getById(opened.episode.id).status, 'acknowledged');
   assert.equal(typeof service.ackTokenSigner.secret, 'string');
+});
+
+test('the service wires email delivery with an injected provider client', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ambassade-alerts-delivery-service-'));
+  const calls = [];
+  const resendClient = {
+    async send(options) {
+      calls.push(options);
+      return { status: 'accepted', providerMessageId: 'resend-service-wired', reason: null };
+    },
+  };
+  const service = createService({ env: serviceEnv(dir), resendClient });
+  t.after(async () => {
+    await service.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  service.emailSettings.update({
+    sender: 'alertes@alertes.vlanp.com',
+    recipient: 'operateur@example.test',
+    sendingSubdomain: 'alertes',
+    apiKey: 're_service_wiring_key',
+  });
+  const opened = service.episodeService.openEpisode({
+    embassyName: 'Ambassade de France',
+    embassyPageUrl: 'https://example.test/ambassade',
+    excerpt: 'Extrait',
+    rules: [{ ruleKey: 'visa', label: 'Section visa modifiée' }],
+  });
+
+  const result = await service.emailService.deliverEpisode(opened);
+
+  assert.equal(result.status, 'accepted');
+  assert.equal(result.providerMessageId, 'resend-service-wired');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].idempotencyKey, `episode-${opened.episode.id}`);
+  assert.equal(service.emailService.getBannerState().visible, false);
+  assert.equal(typeof service.emailService.sendTestEmail, 'function');
 });
 
 test('settings and schema survive a service restart', async (t) => {

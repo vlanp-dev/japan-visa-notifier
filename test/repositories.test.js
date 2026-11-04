@@ -226,6 +226,51 @@ test('email attempts validate states, reasons and one attempt per episode', (t) 
   );
 });
 
+test('delivery claims reserve one episode and complete with the persisted attempt', (t) => {
+  const { repositories } = openTestDatabase(t, { now: () => NOW });
+  const { episodes, emailAttempts, emailDeliveryClaims } = repositories;
+
+  const firstEpisode = episodes.createWithRules({ rules: [{ ruleKey: 'a', label: 'A' }] });
+  const firstClaim = emailDeliveryClaims.claim(firstEpisode.id, { claimToken: 'claim-a' });
+  assert.equal(firstClaim.claimed, true);
+  assert.equal(firstClaim.claim.pending, true);
+  assert.equal(firstClaim.claim.claimToken, 'claim-a');
+
+  const duplicateClaim = emailDeliveryClaims.claim(firstEpisode.id, { claimToken: 'claim-b' });
+  assert.equal(duplicateClaim.claimed, false);
+  assert.equal(duplicateClaim.claim.claimToken, 'claim-a');
+
+  const completed = emailDeliveryClaims.complete({
+    episodeId: firstEpisode.id,
+    claimToken: 'claim-a',
+    status: 'accepted',
+    providerMessageId: 'resend-claim-a',
+  });
+  assert.equal(completed.created, true);
+  assert.equal(completed.completed, true);
+  assert.equal(completed.attempt.status, 'accepted');
+  assert.equal(completed.attempt.providerMessageId, 'resend-claim-a');
+  assert.equal(emailDeliveryClaims.findByEpisodeId(firstEpisode.id).outcome, 'accepted');
+
+  const racedEpisode = episodes.createWithRules({ rules: [{ ruleKey: 'b', label: 'B' }] });
+  emailDeliveryClaims.claim(racedEpisode.id, { claimToken: 'claim-c' });
+  emailAttempts.create({
+    episodeId: racedEpisode.id,
+    status: 'refused',
+    reason: 'HTTP 401 : clé invalide',
+  });
+  const raced = emailDeliveryClaims.complete({
+    episodeId: racedEpisode.id,
+    claimToken: 'claim-c',
+    status: 'accepted',
+    providerMessageId: 'resend-too-late',
+  });
+  assert.equal(raced.created, false);
+  assert.equal(raced.attempt.status, 'refused');
+  assert.equal(raced.attempt.reason, 'HTTP 401 : clé invalide');
+  assert.equal(emailDeliveryClaims.findByEpisodeId(racedEpisode.id).outcome, 'refused');
+});
+
 test('refused count follows the last accepted send and ignores not_attempted', (t) => {
   const { repositories } = openTestDatabase(t);
   const { episodes, emailAttempts } = repositories;
