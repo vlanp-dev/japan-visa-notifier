@@ -26,5 +26,21 @@
     "use_starttls": true,
     "timeout_seconds": 10.0,
     "outbox_path": ""
+  },
+  "sms": {
+    "provider": "fournisseur-gratuit-a-verifier",
+    "url": "https://sms.example.org/api/send",
+    "method": "POST",
+    "auth_mode": "bearer",
+    "auth_header": "Authorization",
+    "auth_query_param": "api_key",
+    "sender": "Alertes",
+    "recipient": "+33600000000",
+    "credential": "remplacer-par-la-cle-du-fournisseur",
+    "body_template": "",
+    "timeout_seconds": 10.0,
+    "max_response_bytes": 65536,
+    "success_json_field": "",
+    "success_json_value": ""
   }
 }
