@@ -1,27 +1,21 @@
-"""Application factory and placeholder routes."""
+"""Application factory and HTTP routes."""
 
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Mapping
+from typing import Any
 
 from .config import Config, load_config
 from .db import connect
 from .detection.admin import register_rule_routes
+from .detection.dashboard import register_dashboard_routes
 from .detection.refreeze import RefreezeService
 from .detection.refreeze_admin import register_refreeze_routes
 from .detection.store import Store
 from .logging_setup import StructuredLogger
 from .runtime import Runtime
 from .security import CsrfMiddleware, SecurityHeadersMiddleware
-from .web import (
-    Application,
-    Request,
-    escape,
-    html_response,
-    json_response,
-    render_page,
-)
+from .web import Application, Request, json_response
 
 
 def create_app(
@@ -46,8 +40,8 @@ def create_app(
     register_refreeze_routes(
         application, store, refreeze_service, config, logger
     )
+    register_dashboard_routes(application, store, config, logger)
     application.add_route("GET", "/health", _health_handler(config))
-    application.add_route("GET", "/", _status_handler(config))
     return SecurityHeadersMiddleware(
         CsrfMiddleware(application, config.max_request_bytes)
     )
@@ -70,27 +64,6 @@ def _health_handler(config: Config):
             200,
             {"status": "ok", "service": "detection-calendrier"},
         )
-
-    return handle
-
-
-def _status_handler(config: Config):
-    def handle(request: Request):
-        content = (
-            "<h1>Veille du calendrier</h1>\n"
-            "<p>Service de détection — fondation active.</p>\n"
-            "<dl>\n"
-            f"<dt>Page surveillée</dt><dd>{escape(config.target_url)}</dd>\n"
-            f"<dt>Intervalle de contrôle</dt>"
-            f"<dd>{escape(config.interval_seconds)} secondes</dd>\n"
-            f"<dt>Opérateur</dt><dd>{escape(config.operator_label)}</dd>\n"
-            "</dl>\n"
-            '<p><a href="/rules">Gérer les règles de détection</a></p>\n'
-            '<p><a href="/reference/refreeze">Refiger la référence</a></p>\n'
-            "<p>Cette page de statut est provisoire. Les résultats de contrôle "
-            "et l'historique seront affichés ici.</p>"
-        )
-        return html_response(200, render_page("Veille du calendrier", content))
 
     return handle
 
