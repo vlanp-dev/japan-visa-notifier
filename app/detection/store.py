@@ -271,6 +271,49 @@ class Store:
         assert record is not None
         return record
 
+    def refreeze_reference(
+        self,
+        seed: ReferenceSeed,
+        *,
+        operator_label: str,
+        message: str | None = None,
+        occurred_at: str | None = None,
+    ) -> tuple[ReferenceRecord, RefreezeEventRecord]:
+        """Replace the current reference and record the success event atomically.
+
+        The previous reference is superseded, the new immutable reference is
+        inserted and the success event is written in a single transaction.  Any
+        error rolls back all three writes, so a failed refreeze can never leave
+        the current reference pointing at a half-recorded state.
+        """
+
+        now = utc_now_iso()
+        with self._connection() as connection, connection:
+            row = connection.execute(
+                "SELECT id FROM page_references WHERE is_current = 1"
+            ).fetchone()
+            previous_id = int(row["id"]) if row is not None else None
+            reference_id = _insert_reference(
+                connection,
+                replace(seed, previous_reference_id=previous_id),
+                supersede=True,
+            )
+            event_id = _insert_refreeze_event(
+                connection,
+                occurred_at=occurred_at or now,
+                success=True,
+                previous_reference_id=previous_id,
+                new_reference_id=reference_id,
+                operator_label=operator_label,
+                message=message,
+                created_at=now,
+            )
+        reference = self.get_reference(reference_id)
+        assert reference is not None
+        event = self.get_refreeze_event(event_id)
+        assert event is not None
+        return reference, event
+
     # -- checks and per-rule results ----------------------------------
 
     def record_check(
@@ -413,30 +456,26 @@ class Store:
     ) -> RefreezeEventRecord:
         now = utc_now_iso()
         with self._connection() as connection, connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO refreeze_events
-                    (occurred_at, success, previous_reference_id,
-                     new_reference_id, operator_label, message, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    occurred_at or now,
-                    1 if success else 0,
-                    previous_reference_id,
-                    new_reference_id,
-                    operator_label,
-                    message,
-                    now,
-                ),
+            event_id = _insert_refreeze_event(
+                connection,
+                occurred_at=occurred_at or now,
+                success=success,
+                previous_reference_id=previous_reference_id,
+                new_reference_id=new_reference_id,
+                operator_label=operator_label,
+                message=message,
+                created_at=now,
             )
-            event_id = int(cursor.lastrowid)
+        event = self.get_refreeze_event(event_id)
+        assert event is not None
+        return event
+
+    def get_refreeze_event(self, event_id: int) -> RefreezeEventRecord | None:
         with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM refreeze_events WHERE id = ?", (event_id,)
             ).fetchone()
-        assert row is not None
-        return _refreeze_event_from_row(row)
+        return _refreeze_event_from_row(row) if row is not None else None
 
     def list_refreeze_events(self, limit: int = 20) -> list[RefreezeEventRecord]:
         """Return refreeze events newest first."""
@@ -490,6 +529,37 @@ def _insert_reference(
             previous_id,
             1 if supersede else 0,
             seed.captured_at,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _insert_refreeze_event(
+    connection: sqlite3.Connection,
+    *,
+    occurred_at: str,
+    success: bool,
+    previous_reference_id: int | None,
+    new_reference_id: int | None,
+    operator_label: str,
+    message: str | None,
+    created_at: str,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO refreeze_events
+            (occurred_at, success, previous_reference_id,
+             new_reference_id, operator_label, message, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            occurred_at,
+            1 if success else 0,
+            previous_reference_id,
+            new_reference_id,
+            operator_label,
+            message,
+            created_at,
         ),
     )
     return int(cursor.lastrowid)

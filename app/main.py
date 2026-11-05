@@ -8,6 +8,8 @@ from typing import Any, Mapping
 from .config import Config, load_config
 from .db import connect
 from .detection.admin import register_rule_routes
+from .detection.refreeze import RefreezeService
+from .detection.refreeze_admin import register_refreeze_routes
 from .detection.store import Store
 from .logging_setup import StructuredLogger
 from .runtime import Runtime
@@ -26,15 +28,24 @@ def create_app(
     config: Config | None = None,
     logger: StructuredLogger | None = None,
     store: Store | None = None,
+    refreeze_service: RefreezeService | None = None,
 ) -> Any:
     """Build the WSGI callable, initializing the database idempotently."""
 
     config = config or load_config()
     logger = logger or StructuredLogger()
     store = store if store is not None else Store(config.database_path)
+    refreeze_service = (
+        refreeze_service
+        if refreeze_service is not None
+        else RefreezeService(config, store, logger=logger)
+    )
 
     application = Application(config, logger)
     register_rule_routes(application, store, logger)
+    register_refreeze_routes(
+        application, store, refreeze_service, config, logger
+    )
     application.add_route("GET", "/health", _health_handler(config))
     application.add_route("GET", "/", _status_handler(config))
     return SecurityHeadersMiddleware(
@@ -75,6 +86,7 @@ def _status_handler(config: Config):
             f"<dt>Opérateur</dt><dd>{escape(config.operator_label)}</dd>\n"
             "</dl>\n"
             '<p><a href="/rules">Gérer les règles de détection</a></p>\n'
+            '<p><a href="/reference/refreeze">Refiger la référence</a></p>\n'
             "<p>Cette page de statut est provisoire. Les résultats de contrôle "
             "et l'historique seront affichés ici.</p>"
         )

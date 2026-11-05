@@ -50,6 +50,7 @@ from .rules import (
     validate_parameters,
     validate_rule,
 )
+from .refreeze import RefreezeResult, RefreezeService
 from .scheduler import DEFAULT_INTERVAL_SECONDS, Scheduler
 from .service import (
     OUTCOME_CHANGED,
@@ -104,6 +105,8 @@ __all__ = [
     "ReferenceRecord",
     "ReferenceSeed",
     "RefreezeEventRecord",
+    "RefreezeResult",
+    "RefreezeService",
     "Rule",
     "RuleResult",
     "RuleValidationError",
