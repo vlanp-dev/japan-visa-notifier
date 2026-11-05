@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { openDatabase } from '../src/db.js';
-import { MIGRATIONS } from '../src/migrations.js';
+import { isBusyError, MIGRATIONS, withBusyRetry } from '../src/migrations.js';
 import { makeTempDir } from './helpers.js';
 import { join } from 'node:path';
 
@@ -84,6 +84,40 @@ test('initial migration creates all foundation tables and indexes', (t) => {
 
   assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count, MIGRATIONS.length);
+});
+
+test('startup retries a locked database but rethrows other errors', () => {
+  let attempts = 0;
+  const value = withBusyRetry(
+    () => {
+      attempts += 1;
+      if (attempts < 3) {
+        const error = new Error('database is locked');
+        error.code = 'SQLITE_BUSY';
+        throw error;
+      }
+      return 'opened';
+    },
+    { attempts: 5, delayMs: 1 },
+  );
+  assert.equal(value, 'opened');
+  assert.equal(attempts, 3);
+
+  let failures = 0;
+  assert.throws(
+    () =>
+      withBusyRetry(
+        () => {
+          failures += 1;
+          throw new TypeError('not a lock');
+        },
+        { attempts: 5, delayMs: 1 },
+      ),
+    TypeError,
+  );
+  assert.equal(failures, 1);
+  assert.equal(isBusyError(new Error('database table is locked')), true);
+  assert.equal(isBusyError(new TypeError('not a lock')), false);
 });
 
 test('migrations are idempotent across reopen', (t) => {

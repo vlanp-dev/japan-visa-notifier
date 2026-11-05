@@ -24,7 +24,14 @@ function requirePublicBaseUrl(value) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new TypeError('publicBaseUrl must use http or https.');
   }
-  return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+  if (parsed.username !== '' || parsed.password !== '' || parsed.search !== '' || parsed.hash !== '') {
+    throw new TypeError('publicBaseUrl must be an origin without credentials, query or fragment.');
+  }
+  const pathname = parsed.pathname.replace(/\/+$/, '');
+  if (pathname !== '') {
+    throw new TypeError('publicBaseUrl must not contain a path; acknowledgement links are served at the root.');
+  }
+  return parsed.origin;
 }
 
 function requirePositiveInteger(value, name) {

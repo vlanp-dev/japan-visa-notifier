@@ -224,7 +224,7 @@ test('two rules at one control produce one episode attempt and one provider requ
 
   const response = await openEpisode(context);
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get('location'), '/?opened=1&delivery=accepted');
+  assert.equal(response.headers.get('location'), '/?opened=1');
 
   assert.equal(context.resend.requests.length, 1, 'exactly one provider request');
   assert.equal(attemptsOf(context).length, 1, 'exactly one persisted attempt');
@@ -304,7 +304,7 @@ test('an invalid provider key is refused with the provider message visible, and 
 
   const first = await openEpisode(context);
   assert.equal(first.status, 303);
-  assert.equal(first.headers.get('location'), '/?opened=1&delivery=refused');
+  assert.equal(first.headers.get('location'), '/?opened=1');
   assert.equal(context.resend.requests.length, 1);
 
   const [firstAttempt] = attemptsOf(context);
@@ -319,7 +319,7 @@ test('an invalid provider key is refused with the provider message visible, and 
     'the provider reason never contains the API key',
   );
 
-  const firstDashboard = await (await getPage(context, '/?opened=1&delivery=refused')).text();
+  const firstDashboard = await (await getPage(context, '/?opened=1')).text();
   assert.match(firstDashboard, /Refusé/);
   assert.match(firstDashboard, /API key is invalid/);
   assert.doesNotMatch(
@@ -330,12 +330,12 @@ test('an invalid provider key is refused with the provider message visible, and 
 
   const second = await openEpisode(context);
   assert.equal(second.status, 303);
-  assert.equal(second.headers.get('location'), '/?opened=2&delivery=refused');
+  assert.equal(second.headers.get('location'), '/?opened=2');
   assert.equal(context.resend.requests.length, 2);
   assert.equal(attemptsOf(context).length, 2);
   assert.ok(attemptsOf(context).every((attempt) => attempt.status === 'refused'));
 
-  const secondDashboard = await (await getPage(context, '/?opened=2&delivery=refused')).text();
+  const secondDashboard = await (await getPage(context, '/?opened=2')).text();
   assert.match(secondDashboard, /Échecs d’envoi répétés/);
   assert.match(secondDashboard, /Vérifier la configuration email/);
   assert.match(secondDashboard, /API key is invalid/);
@@ -357,12 +357,15 @@ test('the banner starts at the second refusal, ignores not_attempted, survives a
   });
 
   const first = await postTestEmail(context);
-  assert.equal(first.headers.get('location'), '/?test=refused');
-  let body = await (await getPage(context, '/')).text();
+  const firstId = attemptsOf(context)[0].id;
+  assert.equal(first.headers.get('location'), `/?test=${firstId}`);
+  let body = await (await getPage(context, first.headers.get('location'))).text();
+  assert.match(body, /Test d’envoi : refusé/);
   assert.doesNotMatch(body, /Échecs d’envoi répétés/);
 
   const second = await postTestEmail(context);
-  assert.equal(second.headers.get('location'), '/?test=refused');
+  const secondId = attemptsOf(context)[0].id;
+  assert.equal(second.headers.get('location'), `/?test=${secondId}`);
   assert.equal(context.resend.requests.length, 2);
   body = await (await getPage(context, '/')).text();
   assert.match(body, /Échecs d’envoi répétés/);
@@ -370,7 +373,8 @@ test('the banner starts at the second refusal, ignores not_attempted, survives a
 
   rmSync(join(context.dir, 'resend-api-key'));
   const notAttempted = await postTestEmail(context);
-  assert.equal(notAttempted.headers.get('location'), '/?test=not_attempted');
+  const notAttemptedId = attemptsOf(context)[0].id;
+  assert.equal(notAttempted.headers.get('location'), `/?test=${notAttemptedId}`);
   assert.equal(context.resend.requests.length, 2, 'not_attempted never calls the provider');
   assert.equal(attemptsOf(context).length, 3);
   assert.equal(
@@ -397,8 +401,9 @@ test('the banner starts at the second refusal, ignores not_attempted, survives a
   await saveSettings(context, { apiKey: API_KEY });
   context.resend.accept('resend-banner-cleared');
   const accepted = await postTestEmail(context);
-  assert.equal(accepted.headers.get('location'), '/?test=accepted');
-  body = await (await getPage(context, '/')).text();
+  const acceptedId = attemptsOf(context)[0].id;
+  assert.equal(accepted.headers.get('location'), `/?test=${acceptedId}`);
+  body = await (await getPage(context, accepted.headers.get('location'))).text();
   assert.doesNotMatch(body, /Échecs d’envoi répétés/, 'an acceptance clears the banner');
   assert.match(body, /Accepté par le fournisseur/);
 });
@@ -408,7 +413,7 @@ test('missing configuration records not_attempted without a provider request', a
 
   const response = await openEpisode(context);
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get('location'), '/?opened=1&delivery=not_attempted');
+  assert.equal(response.headers.get('location'), '/?opened=1');
   assert.equal(context.resend.requests.length, 0, 'no provider request without configuration');
 
   const [attempt] = attemptsOf(context);
@@ -420,7 +425,7 @@ test('missing configuration records not_attempted without a provider request', a
   assert.match(attempt.reason, /sous-domaine d’envoi/);
   assert.match(attempt.reason, /clé API Resend/);
 
-  const body = await (await getPage(context, '/?opened=1&delivery=not_attempted')).text();
+  const body = await (await getPage(context, '/?opened=1')).text();
   assert.match(body, /Non tenté/);
   assert.match(body, /Configuration email incomplète/);
   assert.match(body, /Envoi : non tenté/);
@@ -532,7 +537,7 @@ test('the interface and emails make no deliverability, opening or click claim', 
   assert.equal(context.resend.requests.length, 2);
 
   const pages = [];
-  for (const path of ['/?opened=1&delivery=accepted', '/settings', '/episodes/new']) {
+  for (const path of ['/?opened=1', '/settings', '/episodes/new']) {
     const page = await getPage(context, path);
     assert.equal(page.status, 200);
     pages.push(await page.text());

@@ -9,6 +9,7 @@ import { EmailSettingsService } from './email/settings.js';
 import { createApp } from './http/app.js';
 import { createLogger } from './logger.js';
 import { createRepositories } from './repositories/index.js';
+import { AlertEpisodeService } from './services/alert-episode-service.js';
 import { EpisodeService } from './services/episode-service.js';
 import { registerOperatorUiRoutes } from './ui/routes.js';
 
@@ -60,6 +61,13 @@ export function createService({
       resendClient: resendClient ?? createResendClient({ logger: log }),
       logger: log,
     });
+  // Every producer of alert episodes goes through this use case, which commits
+  // the episode and its delivery intent together and then makes the mandatory
+  // single email attempt.
+  const alertEpisodes = new AlertEpisodeService({
+    episodeService: episodes,
+    emailService: mailer,
+  });
   const app = createApp({
     config,
     logger: log,
@@ -69,7 +77,7 @@ export function createService({
       registerAckRoutes(httpApp, { episodeService: episodes });
       registerOperatorUiRoutes(httpApp, {
         repositories,
-        episodeService: episodes,
+        alertEpisodeService: alertEpisodes,
         emailService: mailer,
         emailSettings,
         tokenSigner,
@@ -98,6 +106,7 @@ export function createService({
     repositories,
     ackTokenSigner: tokenSigner,
     episodeService: episodes,
+    alertEpisodeService: alertEpisodes,
     emailSettings,
     emailService: mailer,
     app,

@@ -111,43 +111,133 @@ export const MIGRATIONS = Object.freeze([
         ON email_delivery_claims (completed_at);
     `,
   },
+  {
+    version: 4,
+    name: 'email delivery claim start marker',
+    up: `
+      -- Claims created before this migration were written immediately before
+      -- the provider call, so they are treated as already started. Claims
+      -- written by the opening transaction keep started_at NULL until a
+      -- delivery caller atomically takes them over.
+      ALTER TABLE email_delivery_claims ADD COLUMN started_at TEXT;
+      UPDATE email_delivery_claims SET started_at = claimed_at WHERE started_at IS NULL;
+    `,
+  },
 ]);
 
-export function migrate(db, migrations = MIGRATIONS) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
+const BUSY_RETRY_DELAY_MS = 25;
+const BUSY_RETRY_ATTEMPTS = 200;
 
-  const applied = new Set(
-    db.prepare('SELECT version FROM schema_migrations').all().map((row) => row.version),
-  );
+/** True when SQLite asks the caller to retry because another writer holds a lock. */
+export function isBusyError(error) {
+  if (error === null || typeof error !== 'object') {
+    return false;
+  }
+  if (error.code === 'SQLITE_BUSY' || error.code === 'SQLITE_LOCKED') {
+    return true;
+  }
+  return typeof error.message === 'string' && /database (?:table )?is locked/i.test(error.message);
+}
 
-  for (const migration of migrations) {
-    if (applied.has(migration.version)) {
-      continue;
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Retry a synchronous SQLite operation while the database is briefly locked. */
+export function withBusyRetry(
+  operation,
+  { attempts = BUSY_RETRY_ATTEMPTS, delayMs = BUSY_RETRY_DELAY_MS } = {},
+) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!isBusyError(error)) {
+        throw error;
+      }
+      lastError = error;
+      sleepSync(delayMs);
     }
+  }
+  throw lastError;
+}
+
+function validateMigrations(migrations) {
+  if (!Array.isArray(migrations)) {
+    throw new TypeError('migrations must be an array.');
+  }
+  let previous = 0;
+  for (const migration of migrations) {
     if (!Number.isInteger(migration.version) || migration.version < 1) {
       throw new Error('Migration versions must be positive integers.');
     }
-    db.exec('BEGIN IMMEDIATE');
-    try {
+    if (migration.version <= previous) {
+      throw new Error('Migration versions must be strictly increasing.');
+    }
+    if (typeof migration.name !== 'string' || migration.name === '') {
+      throw new Error('Migration names must be non-empty strings.');
+    }
+    if (typeof migration.up !== 'string' || migration.up.trim() === '') {
+      throw new Error('Migration SQL must be a non-empty string.');
+    }
+    previous = migration.version;
+  }
+}
+
+function applyMigration(db, migration) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Re-check inside the write transaction: another process may have applied
+    // this migration between our earlier look and acquiring the write lock.
+    const alreadyApplied = db
+      .prepare('SELECT 1 AS applied FROM schema_migrations WHERE version = ?')
+      .get(migration.version);
+    if (!alreadyApplied) {
       db.exec(migration.up);
       db.prepare(
         'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)',
       ).run(migration.version, migration.name, new Date().toISOString());
-      db.exec('COMMIT');
-    } catch (error) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {
-        // Preserve the original migration error.
-      }
-      throw error;
+    }
+    db.exec('COMMIT');
+    return !alreadyApplied;
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Preserve the original migration error.
+    }
+    throw error;
+  }
+}
+
+/**
+ * Apply every missing migration. Every version is checked and applied under
+ * BEGIN IMMEDIATE, and lock contention is retried, so two processes starting
+ * against the same database cannot race the same migration.
+ */
+export function migrate(db, migrations = MIGRATIONS) {
+  validateMigrations(migrations);
+
+  withBusyRetry(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+  });
+
+  let appliedCount = 0;
+  for (const migration of migrations) {
+    let applied = false;
+    // `applyMigration` may fail mid-transaction when another process holds the
+    // write lock; retrying the whole transaction also re-checks the version.
+    applied = withBusyRetry(() => applyMigration(db, migration));
+    if (applied) {
+      appliedCount += 1;
     }
   }
-  return applied.size;
+  return appliedCount;
 }

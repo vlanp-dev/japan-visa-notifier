@@ -274,20 +274,18 @@ test('the service redacts the API key echoed by a custom provider client', async
   assert.ok(!context.captured.lines.join('\n').includes(API_KEY));
 });
 
-test('an invalid sender produces a visible refusal and does not stop later sends', async (t) => {
+test('an invalid sender is recorded as not attempted and does not stop later sends', async (t) => {
   const context = createDeliveryContext(t, {
-    handler: (options, index) =>
-      index === 1
-        ? refused('HTTP 422 (validation_error) : adresse expéditeur invalide')
-        : accepted('resend-after-invalid-sender'),
+    handler: (_options, index) =>
+      index === 1 ? accepted('resend-after-invalid-sender') : accepted('resend-later'),
   });
   context.repositories.settings.set('email.sender', 'adresse-sans-domaine');
 
   const first = await context.emailService.deliverEpisode(openEpisode(context));
-  assert.equal(first.status, 'refused');
-  assert.match(first.reason, /HTTP 422/);
-  assert.match(first.reason, /expéditeur invalide/);
-  assert.equal(context.client.calls[0].from, 'adresse-sans-domaine');
+  assert.equal(first.status, 'not_attempted');
+  assert.match(first.reason, /Configuration email invalide/);
+  assert.match(first.reason, /expéditeur/);
+  assert.equal(context.client.calls.length, 0);
   assert.equal(
     context.repositories.emailAttempts.list({ limit: 10 })[0].reason,
     first.reason,
@@ -296,6 +294,7 @@ test('an invalid sender produces a visible refusal and does not stop later sends
   context.repositories.settings.set('email.sender', SETTINGS.sender);
   const second = await context.emailService.deliverEpisode(openEpisode(context));
   assert.equal(second.status, 'accepted');
+  assert.equal(context.client.calls.length, 1);
 });
 
 test('a network failure is recorded as refused and never rejects the call', async (t) => {
@@ -395,13 +394,15 @@ test('two service instances over the same database make a single provider reques
   secondDb.close();
 });
 
-test('an unfinished durable claim blocks a second provider call and stays indeterminate', async (t) => {
+test('a claim started by a crashed process blocks another provider call and stays indeterminate', async (t) => {
   const context = createDeliveryContext(t);
   const opened = openEpisode(context);
-  const claim = context.repositories.emailDeliveryClaims.claim(opened.episode.id, {
-    claimToken: 'stale-claim-token',
+  // Simulate a process that opened the episode, started its claim and then
+  // crashed before recording an attempt.
+  const started = context.repositories.emailDeliveryClaims.start(opened.episode.id, {
+    claimToken: opened.deliveryClaimToken,
   });
-  assert.equal(claim.claimed, true);
+  assert.equal(started.started, true);
 
   const result = await context.emailService.deliverEpisode(opened);
 
@@ -415,6 +416,14 @@ test('an unfinished durable claim blocks a second provider call and stays indete
   const state = context.emailService.getDeliveryState(opened.episode.id);
   assert.equal(state.pending, true);
   assert.equal(state.status, null);
+
+  // A claim committed with the episode but never started is also reported as
+  // pending, not as an absent attempt.
+  const neverStarted = openEpisode(context);
+  const unstartedState = context.emailService.getDeliveryState(neverStarted.episode.id);
+  assert.equal(unstartedState.pending, true);
+  assert.equal(unstartedState.status, null);
+  assert.equal(context.client.calls.length, 0);
 });
 
 test('the returned outcome is the persisted row when another writer wins the insert', async (t) => {

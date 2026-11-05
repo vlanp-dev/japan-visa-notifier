@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { safeHttpUrl } from '../http/html.js';
 import { isoNow, requireNonEmptyString } from '../repositories/validation.js';
 
@@ -108,10 +108,16 @@ export class EpisodeService {
   openEpisode(input = {}) {
     const embassyName = optionalText(input.embassyName, 'embassyName', MAX_EMBASSY_NAME_LENGTH);
     const embassyPageUrl = pageUrl(input.embassyPageUrl);
-    if (input.excerpt !== undefined && typeof input.excerpt !== 'string') {
+    if (embassyPageUrl === null) {
+      throw new TypeError('embassyPageUrl is required for an alert episode.');
+    }
+    if (typeof input.excerpt !== 'string') {
       throw new TypeError('excerpt must be a string.');
     }
-    const excerpt = input.excerpt ?? '';
+    if (input.excerpt.trim() === '') {
+      throw new TypeError('excerpt must not be empty for an alert episode.');
+    }
+    const excerpt = input.excerpt;
     if (excerpt.length > MAX_EXCERPT_LENGTH) {
       throw new TypeError(`excerpt must be at most ${MAX_EXCERPT_LENGTH} characters.`);
     }
@@ -123,6 +129,10 @@ export class EpisodeService {
       throw new TypeError('generateNonce must return a non-empty string.');
     }
     const expiresAt = this.tokenSigner.nextExpiry();
+    // The delivery intent is committed with the episode. A crash before the
+    // provider call therefore leaves an explicit pending claim, never an open
+    // episode with no trace of the mandatory notification.
+    const deliveryClaimToken = randomUUID();
 
     const stored = this.repositories.episodes.createWithRules({
       openedAt,
@@ -132,6 +142,7 @@ export class EpisodeService {
       contentHash,
       ackNonce: nonce,
       ackTokenExpiresAt: expiresAt,
+      deliveryClaimToken,
       rules,
     });
     const token = this.tokenSigner.issue({ episodeId: stored.id, nonce, expiresAt });
@@ -139,6 +150,7 @@ export class EpisodeService {
       episode: this.repositories.episodes.getWithRules(stored.id),
       token,
       acknowledgementUrl: this.tokenSigner.acknowledgementUrl(token),
+      deliveryClaimToken,
       expiresAt,
     };
   }

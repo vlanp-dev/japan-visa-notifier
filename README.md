@@ -1,9 +1,11 @@
 # Ambassade alerts
 
-Small self-hosted service that watches embassy pages and alerts the operator by
-email when an alert episode opens. Email delivery uses
-[Resend](https://resend.com) through the delivery path described below; this
-service starts and stays healthy without any email configuration.
+Small self-hosted service that records embassy-page alert episodes and alerts
+the operator by email when an episode opens. The operator declares episodes
+through the interface; this repository does not ship a page-crawling producer.
+Email delivery uses [Resend](https://resend.com) through the delivery path
+described below; the service starts and stays healthy without any email
+configuration.
 
 The service has **no runtime dependencies**. It runs on Node.js 24 and only uses
 built-in modules (`node:http`, `node:sqlite`, `node:crypto`, `node:test`, and the
@@ -35,7 +37,7 @@ All configuration comes from environment variables.
 | `DATA_DIR` | `./data` | Directory holding the SQLite database. Created automatically. |
 | `DATABASE_PATH` | `<DATA_DIR>/alerts.sqlite` | Optional database file path. Relative paths resolve under `DATA_DIR`; `:memory:` is accepted. |
 | `RESEND_API_KEY_FILE` | `<DATA_DIR>/resend-api-key` | Optional path of the `0600` file holding the Resend API key. Relative paths resolve under `DATA_DIR`. |
-| `PUBLIC_BASE_URL` | `http://127.0.0.1:<PORT>` | Public origin used to build absolute links (acknowledgement, embassy page). Required in production and must be `http` or `https`. |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:<PORT>` | Public origin used to build absolute links (acknowledgement, embassy page). Required in production and must be `http` or `https`, without credentials, query, fragment or path: acknowledgement routes are served at the root. |
 | `OPERATOR_USERNAME` | `operator` in development/test | HTTP Basic auth user. Required in production. |
 | `OPERATOR_PASSWORD` | `development-password` in development/test | HTTP Basic auth password. Required in production (at least 12 characters). |
 | `ACK_TOKEN_SECRET` | random, persisted in `app_secrets` | Optional HMAC secret used to sign acknowledgement links. When unset, a random secret is generated once and stored in the database. In production an explicit value must be at least 32 characters. |
@@ -61,7 +63,10 @@ Email settings are stored in the `settings` table:
 - `email.sender` — the single `From` address.
 - `email.recipient` — the single operator address (no recipient lists).
 - `email.sending_subdomain` — the sending subdomain of `vlanp.com`, for example
-  `alertes`. The operator owns that subdomain and its DNS records.
+  `alertes` (or `alertes.vlanp.com`). The operator owns that subdomain and its
+  DNS records. The sender must belong to it; the service refuses a sender whose
+  domain is not `<sending_subdomain>.vlanp.com` (or the subdomain written in
+  full), so “configuration complete” always describes a usable From domain.
 
 `EmailSettingsService.getConfigurationState()` reports the missing fields
 without contacting Resend. It returns the non-secret settings, whether the API
@@ -76,13 +81,18 @@ URLs, and the messages make no deliverability, opening or click claim.
 
 ## Delivery path and one-attempt guarantee
 
-`EmailService.deliverEpisode()` accepts the result of opening an episode
-(`{ episode, acknowledgementUrl }`) and sends the alert email once. Before any
-provider request it inserts a durable claim in `email_delivery_claims`, keyed by
-the episode id. The claim is committed first, so two rules in one episode, two
-concurrent requests, two service instances over the same database, or a restart
-after the claim cannot produce a second provider request. In-process calls are
-also coalesced by an in-flight map.
+`AlertEpisodeService.openAndNotify()` is the application-level use case that
+every producer of alert episodes must call. `EpisodeService.openEpisode()`
+persists the episode, its rules and an **unstarted** durable delivery intent in
+`email_delivery_claims` in one transaction. `EmailService.deliverEpisode()` then
+atomically starts that intent and sends the alert email once. The claim is
+committed with the episode, so there is no window in which an episode is open
+without a recorded notification intent; two rules in one episode, two concurrent
+requests, two service instances over the same database, a restart before the
+provider call, or a crash after a started claim cannot produce a second provider
+request. In-process calls are also coalesced by an in-flight map. An unstarted or
+started claim without a persisted attempt is displayed as an explicit
+indeterminate state and is never retried automatically.
 
 The persisted outcome is exactly one of:
 
@@ -134,15 +144,19 @@ The operator interface is served in French and protected by HTTP Basic auth:
   plus a write-only API key field. Blank fields keep the stored value and the key
   is never sent back to the browser.
 - `GET /episodes/new`, `POST /episodes` — declare one episode with several rules
-  in a single submission. The episode is persisted, then one email attempt is
-  recorded for it.
+  in a single submission through `AlertEpisodeService.openAndNotify()`: the
+  episode and its delivery intent are persisted together, then exactly one email
+  attempt is recorded for it. The page URL and a non-empty modified excerpt are
+  required.
 - `POST /email/test` — send the separate configuration-test email.
 
-All state-changing forms include the CSRF double-submit token. The dashboard
-labels persisted attempts exactly `Accepté par le fournisseur`, `Refusé` or
-`Non tenté`, alongside the stored provider reason, and shows the failure banner
-only when at least two refusals have been recorded since the last acceptance.
-No screen makes a deliverability, opening or click claim.
+All state-changing forms include the CSRF double-submit token. Redirects carry
+only an episode id or a recorded test-attempt id; the dashboard reads the
+persisted attempt or claim and never trusts a delivery state taken from the URL.
+It labels persisted attempts exactly `Accepté par le fournisseur`, `Refusé` or
+`Non tenté`, shows `Indéterminé` for a claim without an attempt, and shows the
+failure banner only when at least two refusals have been recorded since the last
+acceptance. No screen makes a deliverability, opening or click claim.
 
 ## Operator setup
 
@@ -233,9 +247,16 @@ idempotent migrations. The schema contains:
 - `email_attempts` — one attempt per episode (`accepted`, `refused` or
   `not_attempted`), plus independent test sends; a partial unique index enforces
   a single attempt per episode.
-- `email_delivery_claims` — durable pre-send reservation keyed by episode id. A
-  claim is completed in the same transaction as its final attempt; an unfinished
-  claim blocks any further provider request for that episode.
+- `email_delivery_claims` — durable delivery intent keyed by episode id. The
+  opening transaction writes it unstarted; a delivery caller atomically sets
+  `started_at` exactly once before contacting the provider. A claim is completed
+  in the same transaction as its final attempt; an unfinished or started claim
+  blocks any further provider request for that episode.
+
+SQLite startup sets WAL mode and applies migrations under `BEGIN IMMEDIATE`,
+retrying brief `SQLITE_BUSY`/`SQLITE_LOCKED` errors and re-checking each applied
+migration version inside the write transaction. Two replicas may therefore start
+against the same database without racing a migration.
 
 The API key is deliberately absent from this schema; it lives only in the
 private key file.

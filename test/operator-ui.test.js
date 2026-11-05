@@ -194,6 +194,21 @@ test('invalid settings produce a visible French error and leave the service resp
   assert.equal(body.includes(API_KEY), false);
   assert.equal(context.service.emailSettings.getSettings().recipient, null);
 
+  const mismatchedSender = await postForm(
+    context,
+    '/settings',
+    {
+      sender: 'alertes@autre-exemple.test',
+      recipient: SETTINGS.recipient,
+      sendingSubdomain: SETTINGS.sendingSubdomain,
+      apiKey: API_KEY,
+    },
+    { csrf },
+  );
+  assert.equal(mismatchedSender.status, 422);
+  assert.match(await mismatchedSender.text(), /sous-domaine d’envoi/);
+  assert.equal(context.service.emailSettings.getSettings().sender, null);
+
   const health = await fetch(`${context.baseUrl}/health`);
   assert.equal(health.status, 200);
 });
@@ -225,6 +240,37 @@ test('the dashboard shows exact persisted statuses with their reasons', async (t
   assert.match(body, /HTTP 401 \(validation_error\)/);
   assert.match(body, /Configuration email incomplète : clé API Resend\./);
   assertNoForbiddenClaims(body);
+});
+
+test('delivery status comes from persisted rows, never from the query string', async (t) => {
+  const context = await setup(t);
+  const opened = context.service.episodeService.openEpisode({
+    embassyName: 'Ambassade de France',
+    embassyPageUrl: 'https://example.test/ambassade',
+    excerpt: 'Extrait',
+    rules: [{ ruleKey: 'visa', label: 'Section visa modifiée' }],
+  });
+  context.service.repositories.emailAttempts.create({
+    episodeId: opened.episode.id,
+    status: 'refused',
+    reason: 'HTTP 401 (validation_error) : clé API invalide',
+  });
+
+  const forged = await getPage(context, `/?opened=${opened.episode.id}&delivery=accepted`);
+  const forgedBody = await forged.text();
+  assert.match(forgedBody, /Envoi : refusé/);
+  assert.doesNotMatch(forgedBody, /Envoi : accepté/);
+  assert.match(forgedBody, /HTTP 401 \(validation_error\)/);
+
+  const pending = context.service.episodeService.openEpisode({
+    embassyName: 'Ambassade de France',
+    embassyPageUrl: 'https://example.test/autre',
+    excerpt: 'Autre extrait',
+    rules: [{ ruleKey: 'contact', label: 'Contact modifié' }],
+  });
+  const pendingBody = await (await getPage(context, `/?opened=${pending.episode.id}`)).text();
+  assert.match(pendingBody, /Envoi : état indéterminé/);
+  assert.match(pendingBody, /Indéterminé/);
 });
 
 test('the banner appears only at two refusals since the last acceptance', async (t) => {
@@ -284,7 +330,7 @@ test('two rules submitted once produce a single episode, attempt and provider re
   );
 
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get('location'), '/?opened=1&delivery=accepted');
+  assert.equal(response.headers.get('location'), '/?opened=1');
   assert.equal(context.client.calls.length, 1);
 
   const attempts = context.service.repositories.emailAttempts.list();
@@ -354,6 +400,35 @@ test('the episode form rejects missing rules and invalid URLs without a provider
   assert.equal(invalidUrl.status, 400);
   assert.match(await invalidUrl.text(), /URL absolue http\(s\)/);
 
+  const missingUrl = await postForm(
+    context,
+    '/episodes',
+    {
+      embassyName: 'Ambassade',
+      excerpt: 'Extrait',
+      rule0Key: 'visa',
+      rule0Label: 'Section visa',
+    },
+    { csrf },
+  );
+  assert.equal(missingUrl.status, 400);
+  assert.match(await missingUrl.text(), /page de l’ambassade est obligatoire/);
+
+  const missingExcerpt = await postForm(
+    context,
+    '/episodes',
+    {
+      embassyName: 'Ambassade',
+      embassyPageUrl: 'https://example.test/page',
+      excerpt: '   ',
+      rule0Key: 'visa',
+      rule0Label: 'Section visa',
+    },
+    { csrf },
+  );
+  assert.equal(missingExcerpt.status, 400);
+  assert.match(await missingExcerpt.text(), /extrait du contenu modifié est obligatoire/);
+
   assert.equal(context.client.calls.length, 0);
   assert.equal(context.service.repositories.episodes.list().length, 0);
   assert.equal(context.service.repositories.emailAttempts.list().length, 0);
@@ -377,7 +452,7 @@ test('an unconfigured episode is recorded as not attempted without a provider ca
   );
 
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get('location'), '/?opened=1&delivery=not_attempted');
+  assert.equal(response.headers.get('location'), '/?opened=1');
   assert.equal(context.client.calls.length, 0);
   const attempts = context.service.repositories.emailAttempts.list();
   assert.equal(attempts.length, 1);
@@ -398,15 +473,16 @@ test('the test-email action records one test attempt and reports its state', asy
 
   const response = await postForm(context, '/email/test', {}, { csrf });
   assert.equal(response.status, 303);
-  assert.equal(response.headers.get('location'), '/?test=accepted');
+  const location = response.headers.get('location');
   assert.equal(context.client.calls.length, 1);
 
   const attempts = context.service.repositories.emailAttempts.list();
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0].kind, 'test');
   assert.equal(attempts[0].status, 'accepted');
+  assert.equal(location, `/?test=${attempts[0].id}`);
 
-  const body = await (await getPage(context, '/?test=accepted')).text();
+  const body = await (await getPage(context, location)).text();
   assert.match(body, /Test d’envoi : accepté par le fournisseur/);
   assert.match(body, /Accepté par le fournisseur/);
 });

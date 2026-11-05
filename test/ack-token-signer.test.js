@@ -9,7 +9,7 @@ import { openTestDatabase } from './helpers.js';
 
 const NOW = new Date('2026-11-04T10:00:00.000Z');
 const SECRET = 'ack-test-secret-that-is-long-enough';
-const BASE_URL = 'https://alertes.example.test/service';
+const BASE_URL = 'https://alertes.example.test';
 
 function makeSigner({ now = () => NOW, ttlMs = 60_000 } = {}) {
   return new AckTokenSigner({ secret: SECRET, publicBaseUrl: BASE_URL, ttlMs, now });
@@ -30,6 +30,28 @@ test('tokens round-trip episode id, nonce and expiry and are URL-safe', () => {
   assert.equal(
     signer.acknowledgementUrl(token),
     `${BASE_URL}/ack/${encodeURIComponent(token)}`,
+  );
+});
+
+test('the public base URL must be an origin because acknowledgement routes are at the root', () => {
+  for (const publicBaseUrl of [
+    'https://alertes.example.test/service',
+    'https://alertes.example.test/service/',
+    'https://user:pass@alertes.example.test',
+    'https://alertes.example.test?x=1',
+  ]) {
+    assert.throws(
+      () => new AckTokenSigner({ secret: SECRET, publicBaseUrl, now: () => NOW }),
+      TypeError,
+    );
+  }
+  assert.equal(
+    new AckTokenSigner({
+      secret: SECRET,
+      publicBaseUrl: 'https://alertes.example.test/',
+      now: () => NOW,
+    }).acknowledgementUrl('token'),
+    'https://alertes.example.test/ack/token',
   );
 });
 

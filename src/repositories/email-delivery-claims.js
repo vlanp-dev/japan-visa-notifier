@@ -13,20 +13,24 @@ function rowToClaim(row) {
     episodeId: row.episode_id,
     claimToken: row.claim_token,
     claimedAt: row.claimed_at,
+    startedAt: row.started_at,
     completedAt: row.completed_at,
     outcome: row.outcome,
     pending: row.completed_at === null,
+    started: row.started_at !== null,
   };
 }
 
 /**
  * Durable, cross-process claim for the single email attempt of an episode.
  *
- * The claim is inserted and committed before the provider request. A second
- * process, or a process that restarts while a claim is still open, therefore
- * cannot make another provider request. The final `accepted`, `refused` or
- * `not_attempted` attempt and the completion of the claim are written in one
- * transaction.
+ * An opening transaction writes a claim with `started_at` NULL: that is the
+ * durable delivery intent, committed together with the episode. A delivery
+ * caller then atomically sets `started_at` exactly once; only the winner may
+ * contact the provider. Direct callers of `EmailService.deliverEpisode` that
+ * are not using an opening result still create a claim that is immediately
+ * started. The final `accepted`, `refused` or `not_attempted` attempt and the
+ * completion of the claim are written in one transaction.
  */
 export class EmailDeliveryClaimsRepository {
   constructor(db, { now = () => new Date(), emailAttempts = null } = {}) {
@@ -47,8 +51,9 @@ export class EmailDeliveryClaimsRepository {
   }
 
   /**
-   * Insert the pre-send claim. Returns the existing claim when another writer
-   * already reserved this episode, so the caller must not call the provider.
+   * Insert a claim that is immediately owned by this caller. Returns the
+   * existing claim when another writer already reserved this episode, so the
+   * caller must not call the provider.
    */
   claim(episodeId, { claimToken, claimedAt } = {}) {
     toPositiveInteger(episodeId, 'episodeId');
@@ -57,13 +62,35 @@ export class EmailDeliveryClaimsRepository {
 
     const result = this.db
       .prepare(`
-        INSERT INTO email_delivery_claims (episode_id, claim_token, claimed_at)
-        VALUES (?, ?, ?)
+        INSERT INTO email_delivery_claims (episode_id, claim_token, claimed_at, started_at)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT (episode_id) DO NOTHING
       `)
-      .run(episodeId, claimToken, at);
+      .run(episodeId, claimToken, at, at);
     return {
       claimed: result.changes > 0,
+      claim: this.findByEpisodeId(episodeId),
+    };
+  }
+
+  /**
+   * Atomically take over an unstarted delivery intent. Exactly one caller can
+   * transition `started_at` from NULL to a timestamp, including across
+   * processes, so only that caller may make the provider request.
+   */
+  start(episodeId, { claimToken, startedAt } = {}) {
+    toPositiveInteger(episodeId, 'episodeId');
+    requireNonEmptyString(claimToken, 'claimToken');
+    const at = startedAt === undefined ? isoNow(this.now) : requireIsoTimestamp(startedAt, 'startedAt');
+    const result = this.db
+      .prepare(`
+        UPDATE email_delivery_claims
+        SET started_at = ?
+        WHERE episode_id = ? AND claim_token = ? AND started_at IS NULL AND completed_at IS NULL
+      `)
+      .run(at, episodeId, claimToken);
+    return {
+      started: result.changes > 0,
       claim: this.findByEpisodeId(episodeId),
     };
   }
@@ -105,10 +132,10 @@ export class EmailDeliveryClaimsRepository {
       const completed = this.db
         .prepare(`
           UPDATE email_delivery_claims
-          SET completed_at = ?, outcome = ?
+          SET started_at = COALESCE(started_at, ?), completed_at = ?, outcome = ?
           WHERE episode_id = ? AND claim_token = ? AND completed_at IS NULL
         `)
-        .run(at, attempt.status, episodeId, claimToken);
+        .run(at, at, attempt.status, episodeId, claimToken);
 
       this.db.exec('COMMIT');
       return {

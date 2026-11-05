@@ -145,4 +145,9 @@ test('invalid scalar configuration is rejected with a clear config error', () =>
   assert.throws(() => loadConfig({ PUBLIC_BASE_URL: 'ftp://example.test' }), ConfigError);
   assert.throws(() => loadConfig({ PUBLIC_BASE_URL: 'https://user:pass@example.test' }), ConfigError);
   assert.throws(() => loadConfig({ PUBLIC_BASE_URL: 'https://example.test/path?x=1' }), ConfigError);
+  assert.throws(() => loadConfig({ PUBLIC_BASE_URL: 'https://example.test/app' }), ConfigError);
+  assert.throws(
+    () => loadConfig({ PUBLIC_BASE_URL: 'https://example.test/app/' }),
+    (error) => error instanceof ConfigError && /chemin/.test(error.message),
+  );
 });

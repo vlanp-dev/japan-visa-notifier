@@ -71,6 +71,7 @@ function pendingResult(episodeId, claim, reason = PENDING_REASON) {
     attemptedAt: null,
     duplicate: true,
     pending: true,
+    claimStarted: claim?.started === true,
     claimedAt: claim?.claimedAt ?? null,
   };
 }
@@ -100,7 +101,14 @@ function resolveOpening(input) {
   }
   const acknowledgementUrl =
     input.acknowledgementUrl ?? episode.acknowledgementUrl ?? null;
-  return { episode, acknowledgementUrl };
+  const deliveryClaimToken = input.deliveryClaimToken ?? input.claimToken ?? null;
+  if (
+    deliveryClaimToken !== null &&
+    (typeof deliveryClaimToken !== 'string' || deliveryClaimToken.trim() === '')
+  ) {
+    throw new TypeError('deliveryClaimToken doit être une chaîne non vide.');
+  }
+  return { episode, acknowledgementUrl, deliveryClaimToken };
 }
 
 /**
@@ -170,7 +178,7 @@ export class EmailService {
    * claim. It never throws for delivery or configuration failures.
    */
   async deliverEpisode(opening = {}) {
-    const { episode, acknowledgementUrl } = resolveOpening(opening);
+    const { episode, acknowledgementUrl, deliveryClaimToken } = resolveOpening(opening);
     const episodeId = episode.id;
 
     const existing = this.emailAttempts.findByEpisodeId(episodeId);
@@ -183,7 +191,11 @@ export class EmailService {
       return running;
     }
 
-    const promise = this.#deliverEpisodeOnce({ episode, acknowledgementUrl });
+    const promise = this.#deliverEpisodeOnce({
+      episode,
+      acknowledgementUrl,
+      deliveryClaimToken,
+    });
     this.inFlight.set(episodeId, promise);
     try {
       return await promise;
@@ -194,10 +206,30 @@ export class EmailService {
     }
   }
 
-  async #deliverEpisodeOnce({ episode, acknowledgementUrl }) {
+  /**
+   * Acquire the single provider-send slot for an episode. When the opening
+   * transaction already wrote an unstarted intent, `start` atomically claims it
+   * so only one caller — across processes — can contact the provider.
+   */
+  #acquireClaim(episodeId, deliveryClaimToken) {
+    if (deliveryClaimToken === null) {
+      return this.claims.claim(episodeId, { claimToken: randomUUID() });
+    }
+    const existing = this.claims.findByEpisodeId(episodeId);
+    if (existing === null) {
+      return this.claims.claim(episodeId, { claimToken: deliveryClaimToken });
+    }
+    if (existing.claimToken !== deliveryClaimToken || existing.completedAt !== null) {
+      return { claimed: false, claim: existing };
+    }
+    const started = this.claims.start(episodeId, { claimToken: deliveryClaimToken });
+    return { claimed: started.started, claim: started.claim };
+  }
+
+  async #deliverEpisodeOnce({ episode, acknowledgementUrl, deliveryClaimToken }) {
     const episodeId = episode.id;
-    const claimToken = randomUUID();
-    const claimed = this.claims.claim(episodeId, { claimToken });
+    const claimToken = deliveryClaimToken ?? randomUUID();
+    const claimed = this.#acquireClaim(episodeId, deliveryClaimToken);
 
     if (!claimed.claimed) {
       const existing = this.emailAttempts.findByEpisodeId(episodeId);
@@ -353,10 +385,19 @@ export class EmailService {
   #prepareConfiguration() {
     const configuration = this.emailSettings.getConfigurationState();
     if (!configuration.complete) {
-      const reason =
-        typeof configuration.apiKeyError === 'string' && configuration.apiKeyError !== ''
-          ? `Configuration email invalide : ${configuration.apiKeyError}`
-          : `Configuration email incomplète : ${configuration.missing.join(', ')}.`;
+      const missing = Array.isArray(configuration.missing) ? configuration.missing : [];
+      const invalid = Array.isArray(configuration.invalid) ? configuration.invalid : [];
+      let reason;
+      if (typeof configuration.apiKeyError === 'string' && configuration.apiKeyError !== '') {
+        reason = `Configuration email invalide : ${configuration.apiKeyError}`;
+      } else if (missing.length > 0) {
+        reason = `Configuration email incomplète : ${missing.join(', ')}.`;
+        if (invalid.length > 0) {
+          reason += ` Champs invalides : ${invalid.join(', ')}.`;
+        }
+      } else {
+        reason = `Configuration email invalide : champs invalides : ${invalid.join(', ')}.`;
+      }
       return {
         configuration,
         apiKey: null,

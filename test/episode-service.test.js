@@ -86,6 +86,13 @@ test('invalid episode input is rejected before anything is written', (t) => {
     { rules: [{ ruleKey: 'a', label: 'A' }, { ruleKey: 'a', label: 'B' }] },
     { rules: [{ ruleKey: '', label: 'A' }] },
     { rules: [{ ruleKey: 'a', label: '' }] },
+    { rules: [{ ruleKey: 'a', label: 'A' }] },
+    { rules: [{ ruleKey: 'a', label: 'A' }], embassyPageUrl: 'https://example.test/page' },
+    {
+      rules: [{ ruleKey: 'a', label: 'A' }],
+      embassyPageUrl: 'https://example.test/page',
+      excerpt: '   ',
+    },
     { rules: [{ ruleKey: 'a', label: 'A' }], embassyPageUrl: 'ftp://example.test/page' },
     { rules: [{ ruleKey: 'a', label: 'A' }], embassyPageUrl: 'javascript:alert(1)' },
     { rules: [{ ruleKey: 'a', label: 'A' }], excerpt: 42 },
@@ -98,15 +105,20 @@ test('invalid episode input is rejected before anything is written', (t) => {
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM episode_rules').get().count, 0);
 });
 
-test('a failing insert rolls the episode and its rules back together', (t) => {
+test('a failing insert rolls the episode, its rules and the delivery intent back together', (t) => {
   const { db, service } = setup(t, { generateNonce: () => 'repeated-nonce' });
-  service.openEpisode({ rules: [{ ruleKey: 'a', label: 'A' }] });
+  const input = {
+    embassyPageUrl: 'https://example.test/ambassade',
+    excerpt: 'Extrait',
+  };
+  service.openEpisode({ ...input, rules: [{ ruleKey: 'a', label: 'A' }] });
   assert.throws(
-    () => service.openEpisode({ rules: [{ ruleKey: 'b', label: 'B' }, { ruleKey: 'c', label: 'C' }] }),
+    () => service.openEpisode({ ...input, rules: [{ ruleKey: 'b', label: 'B' }, { ruleKey: 'c', label: 'C' }] }),
     /UNIQUE|constraint/i,
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM episodes').get().count, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM episode_rules').get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM email_delivery_claims').get().count, 1);
 });
 
 test('inspection is read-only and acknowledgement transitions open to acknowledged', (t) => {

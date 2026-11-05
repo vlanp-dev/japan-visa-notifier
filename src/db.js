@@ -1,11 +1,12 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { migrate } from './migrations.js';
+import { migrate, withBusyRetry } from './migrations.js';
 
 /**
  * Open the SQLite database, apply PRAGMAs and run idempotent migrations.
- * `:memory:` is supported for tests.
+ * `:memory:` is supported for tests. Lock contention during startup (WAL switch
+ * or a concurrent migration) is retried so two replicas can start together.
  */
 export function openDatabase(databasePath, { migrations } = {}) {
   if (typeof databasePath !== 'string' || databasePath.trim() === '') {
@@ -21,7 +22,7 @@ export function openDatabase(databasePath, { migrations } = {}) {
     db.exec('PRAGMA foreign_keys = ON');
     db.exec('PRAGMA busy_timeout = 5000');
     if (databasePath !== ':memory:') {
-      db.exec('PRAGMA journal_mode = WAL');
+      withBusyRetry(() => db.exec('PRAGMA journal_mode = WAL'));
       db.exec('PRAGMA synchronous = NORMAL');
     }
     migrate(db, migrations);

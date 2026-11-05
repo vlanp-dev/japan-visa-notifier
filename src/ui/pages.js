@@ -179,20 +179,29 @@ function acknowledgementCell(episode, { tokenSigner, now }) {
   return `<a href="/ack/${escapeHtml(encodeURIComponent(token))}">Page d’acquittement</a>`;
 }
 
+function deliveryCell(delivery) {
+  if (delivery && typeof delivery.status === 'string') {
+    return statusBadge(delivery.status);
+  }
+  if (delivery && delivery.pending === true) {
+    return '<span class="status">Indéterminé</span><br><span class="muted">Tentative réservée mais non terminée</span>';
+  }
+  return '<span class="muted">Aucune tentative</span>';
+}
+
 function episodesTable(episodes, options) {
   if (!Array.isArray(episodes) || episodes.length === 0) {
     return '<p class="muted">Aucun épisode enregistré.</p>';
   }
   const rows = episodes
     .map((episode) => {
-      const attempt = episode.attempt;
       return `<tr>
 <td>n° ${escapeHtml(episode.id)}</td>
 <td>${escapeHtml(formatTimestamp(episode.openedAt))}</td>
 <td>${escapeHtml(episode.embassyName ?? '—')}</td>
 <td>${rulesCell(episode.rules)}</td>
 <td>${escapeHtml(episodeStatusLabel(episode.status))}</td>
-<td>${attempt ? statusBadge(attempt.status) : '—'}</td>
+<td>${deliveryCell(episode.delivery)}</td>
 <td>${acknowledgementCell(episode, options)}</td>
 </tr>`;
     })

@@ -35,6 +35,7 @@ const MAX_EMAIL_LENGTH = 254;
 const MAX_SUBDOMAIN_LENGTH = 253;
 const MAX_API_KEY_LENGTH = 512;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+const SENDING_DOMAIN = 'vlanp.com';
 
 export class EmailConfigurationError extends Error {
   constructor(message, { code = 'EMAIL_CONFIGURATION_INVALID' } = {}) {
@@ -76,6 +77,36 @@ function normalizeSubdomain(value) {
     );
   }
   return normalized;
+}
+
+function isValidEmail(value) {
+  return (
+    typeof value === 'string' &&
+    value.length <= MAX_EMAIL_LENGTH &&
+    !/[\s,;<>]/.test(value) &&
+    EMAIL_ADDRESS.test(value)
+  );
+}
+
+function isValidSubdomain(value) {
+  return (
+    typeof value === 'string' &&
+    value.length <= MAX_SUBDOMAIN_LENGTH &&
+    SUBDOMAIN.test(value.toLowerCase())
+  );
+}
+
+/**
+ * The configured sender must belong to the configured sending subdomain of
+ * vlanp.com. The subdomain may be written as `alertes` or `alertes.vlanp.com`.
+ */
+export function senderMatchesSendingSubdomain(sender, sendingSubdomain) {
+  if (!isValidEmail(sender) || !isValidSubdomain(sendingSubdomain)) {
+    return false;
+  }
+  const domain = sender.slice(sender.lastIndexOf('@') + 1).toLowerCase();
+  const subdomain = sendingSubdomain.toLowerCase().replace(/\.+$/, '');
+  return domain === subdomain || domain === `${subdomain}.${SENDING_DOMAIN}`;
 }
 
 /**
@@ -207,23 +238,43 @@ export class EmailSettingsService {
     }
 
     const missingFields = [];
+    const invalidFields = [];
+    const senderValid = isValidEmail(settings.sender);
+    const recipientValid = isValidEmail(settings.recipient);
+    const subdomainValid = isValidSubdomain(settings.sendingSubdomain);
+
     if (settings.sender === null) {
       missingFields.push('sender');
+    } else if (!senderValid) {
+      invalidFields.push('sender');
     }
     if (settings.recipient === null) {
       missingFields.push('recipient');
+    } else if (!recipientValid) {
+      invalidFields.push('recipient');
     }
     if (settings.sendingSubdomain === null) {
       missingFields.push('sendingSubdomain');
+    } else if (!subdomainValid) {
+      invalidFields.push('sendingSubdomain');
+    }
+    if (
+      senderValid &&
+      subdomainValid &&
+      !senderMatchesSendingSubdomain(settings.sender, settings.sendingSubdomain)
+    ) {
+      invalidFields.push('sender');
     }
     if (!apiKeyConfigured) {
       missingFields.push('apiKey');
     }
 
     return {
-      complete: missingFields.length === 0,
+      complete: missingFields.length === 0 && invalidFields.length === 0,
       missingFields,
       missing: missingFields.map((field) => FIELD_LABELS[field]),
+      invalidFields,
+      invalid: invalidFields.map((field) => FIELD_LABELS[field]),
       sender: settings.sender,
       recipient: settings.recipient,
       sendingSubdomain: settings.sendingSubdomain,
@@ -252,15 +303,37 @@ export class EmailSettingsService {
     const sendingSubdomain = optionalText(input.sendingSubdomain, 'sendingSubdomain');
     const apiKey = optionalText(input.apiKey, 'apiKey');
 
+    const normalizedSender = sender === null ? null : normalizeEmail(sender, 'L’expéditeur');
+    const normalizedRecipient =
+      recipient === null ? null : normalizeEmail(recipient, 'Le destinataire');
+    const normalizedSubdomain =
+      sendingSubdomain === null ? null : normalizeSubdomain(sendingSubdomain);
+
+    // Validate the sender and the sending subdomain together before writing
+    // anything: the subdomain must actually govern the From domain, otherwise
+    // "configuration complete" would be misleading.
+    const stored = this.getSettings();
+    const effectiveSender = normalizedSender ?? stored.sender;
+    const effectiveSubdomain = normalizedSubdomain ?? stored.sendingSubdomain;
+    if (
+      isValidEmail(effectiveSender) &&
+      isValidSubdomain(effectiveSubdomain) &&
+      !senderMatchesSendingSubdomain(effectiveSender, effectiveSubdomain)
+    ) {
+      throw new TypeError(
+        `L’expéditeur doit appartenir au sous-domaine d’envoi (${effectiveSubdomain}.${SENDING_DOMAIN} ou ${effectiveSubdomain}).`,
+      );
+    }
+
     const updates = {};
-    if (sender !== null) {
-      updates[EMAIL_SETTING_KEYS.sender] = normalizeEmail(sender, 'L’expéditeur');
+    if (normalizedSender !== null) {
+      updates[EMAIL_SETTING_KEYS.sender] = normalizedSender;
     }
-    if (recipient !== null) {
-      updates[EMAIL_SETTING_KEYS.recipient] = normalizeEmail(recipient, 'Le destinataire');
+    if (normalizedRecipient !== null) {
+      updates[EMAIL_SETTING_KEYS.recipient] = normalizedRecipient;
     }
-    if (sendingSubdomain !== null) {
-      updates[EMAIL_SETTING_KEYS.sendingSubdomain] = normalizeSubdomain(sendingSubdomain);
+    if (normalizedSubdomain !== null) {
+      updates[EMAIL_SETTING_KEYS.sendingSubdomain] = normalizedSubdomain;
     }
 
     if (apiKey !== null) {

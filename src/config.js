@@ -63,7 +63,12 @@ function parsePublicBaseUrl(raw, fallback) {
     throw new ConfigError('PUBLIC_BASE_URL ne doit pas contenir de requête ni de fragment.');
   }
   const pathname = parsed.pathname.replace(/\/+$/, '');
-  return `${parsed.origin}${pathname}`;
+  if (pathname !== '') {
+    throw new ConfigError(
+      'PUBLIC_BASE_URL ne doit pas contenir de chemin : les liens d’acquittement sont servis à la racine.',
+    );
+  }
+  return parsed.origin;
 }
 
 export function loadConfig(env = process.env, { cwd = process.cwd() } = {}) {

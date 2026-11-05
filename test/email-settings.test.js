@@ -177,6 +177,42 @@ test('invalid values are rejected before anything is persisted and never echo th
   assert.equal(existsSync(apiKeyPath), false);
 });
 
+test('the sender must belong to the configured sending subdomain of vlanp.com', (t) => {
+  const { service, repositories } = setup(t);
+
+  assert.throws(
+    () =>
+      service.update({
+        sender: 'alertes@autre-exemple.test',
+        recipient: 'operateur@example.test',
+        sendingSubdomain: 'alertes',
+        apiKey: API_KEY,
+      }),
+    (error) => error instanceof TypeError && /sous-domaine d’envoi/.test(error.message),
+  );
+
+  service.update({
+    sender: 'alertes@alertes.vlanp.com',
+    recipient: 'operateur@example.test',
+    sendingSubdomain: 'alertes',
+    apiKey: API_KEY,
+  });
+  // A directly edited setting can never be reported as a complete
+  // configuration when the From domain does not match the subdomain.
+  repositories.settings.set('email.sender', 'alertes@autre-exemple.test');
+  const state = service.getConfigurationState();
+  assert.equal(state.complete, false);
+  assert.deepEqual(state.invalidFields, ['sender']);
+  assert.equal(service.isConfigured(), false);
+
+  // Both accepted spellings of the subdomain govern the From domain.
+  const accepted = service.update({
+    sender: 'alertes@alertes.vlanp.com',
+    sendingSubdomain: 'alertes.vlanp.com',
+  });
+  assert.equal(accepted.complete, true);
+});
+
 test('an unreadable key file is reported as missing without taking the service down', (t) => {
   const { service, apiKeyPath } = setup(t);
   mkdirSync(apiKeyPath, { recursive: true });

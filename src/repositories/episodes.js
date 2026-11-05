@@ -52,8 +52,10 @@ export class EpisodesRepository {
   }
 
   /**
-   * Persist one episode and all triggered rules atomically. A duplicate rule
-   * key rolls the whole episode back.
+   * Persist one episode, all triggered rules and the durable email delivery
+   * intent atomically. A duplicate rule key rolls the whole episode back. The
+   * claim row is written with `started_at` NULL: it records that this episode
+   * must be notified before any provider request is made.
    */
   createWithRules(
     {
@@ -64,6 +66,7 @@ export class EpisodesRepository {
       contentHash = null,
       ackNonce = null,
       ackTokenExpiresAt = null,
+      deliveryClaimToken = null,
       rules = [],
     } = {},
   ) {
@@ -80,6 +83,9 @@ export class EpisodesRepository {
     if (ackTokenExpiresAt !== null && ackTokenExpiresAt !== undefined) {
       requireIsoTimestamp(ackTokenExpiresAt, 'ackTokenExpiresAt');
     }
+    if (deliveryClaimToken !== null && deliveryClaimToken !== undefined) {
+      requireNonEmptyString(deliveryClaimToken, 'deliveryClaimToken');
+    }
     if (!Array.isArray(rules) || rules.length === 0) {
       throw new TypeError('rules must be a non-empty array.');
     }
@@ -94,6 +100,7 @@ export class EpisodesRepository {
 
     const nonce = ackNonce ?? null;
     const tokenExpiresAt = ackTokenExpiresAt ?? null;
+    const claimToken = deliveryClaimToken ?? null;
 
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -113,6 +120,14 @@ export class EpisodesRepository {
       `);
       for (const rule of normalizedRules) {
         insertRule.run(episodeId, rule.ruleKey, rule.label, rule.detail, at);
+      }
+      if (claimToken !== null) {
+        this.db
+          .prepare(`
+            INSERT INTO email_delivery_claims (episode_id, claim_token, claimed_at, started_at)
+            VALUES (?, ?, ?, NULL)
+          `)
+          .run(episodeId, claimToken, at);
       }
       this.db.exec('COMMIT');
       return this.getById(episodeId);

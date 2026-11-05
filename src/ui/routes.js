@@ -66,10 +66,22 @@ function readEpisodeForm(form) {
     return { values, error: parsedRules.error };
   }
   const embassyPageUrl = values.embassyPageUrl.trim();
-  if (embassyPageUrl !== '' && safeHttpUrl(embassyPageUrl) === null) {
+  if (embassyPageUrl === '') {
+    return {
+      values,
+      error: 'La page de l’ambassade est obligatoire pour déclencher une alerte.',
+    };
+  }
+  if (safeHttpUrl(embassyPageUrl) === null) {
     return {
       values,
       error: 'La page de l’ambassade doit être une URL absolue http(s) sans identifiants.',
+    };
+  }
+  if (values.excerpt.trim() === '') {
+    return {
+      values,
+      error: 'L’extrait du contenu modifié est obligatoire pour déclencher une alerte.',
     };
   }
 
@@ -123,34 +135,63 @@ function testFlash(status) {
   if (status === 'not_attempted') {
     return {
       kind: 'warn',
-      message: 'Test d’envoi : non tenté. La configuration email est incomplète.',
+      message: 'Test d’envoi : non tenté. La configuration email est incomplète ou invalide.',
     };
   }
   return { kind: 'warn', message: 'Test d’envoi : état indéterminé.' };
 }
 
-function dashboardFlash(searchParams) {
-  const test = searchParams.get('test');
-  if (test !== null) {
-    return testFlash(test);
+/**
+ * Build the flash from persisted rows only. Query values are identifiers
+ * (`opened` episode id, `test` attempt id), never delivery states: a crafted or
+ * stale URL cannot claim an outcome the database does not contain. Any other
+ * query value, including the former `delivery` parameter, is ignored.
+ */
+function dashboardFlash(searchParams, { repositories, emailService }) {
+  const testId = searchParams.get('test');
+  if (testId !== null) {
+    if (!/^\d{1,18}$/.test(testId)) {
+      return null;
+    }
+    const attempt = repositories.emailAttempts.findById(Number(testId));
+    if (attempt === null || attempt.kind !== 'test') {
+      return null;
+    }
+    return testFlash(attempt.status);
   }
 
   const opened = searchParams.get('opened');
   if (opened === null || !/^\d{1,18}$/.test(opened)) {
     return null;
   }
-  const delivery = searchParams.get('delivery');
-  let message = `Épisode n° ${opened} déclaré.`;
-  if (delivery === 'accepted') {
-    message += ' Envoi : accepté par le fournisseur.';
-  } else if (delivery === 'refused') {
-    message += ' Envoi : refusé. Le motif du fournisseur est enregistré ci-dessous.';
-  } else if (delivery === 'not_attempted') {
-    message += ' Envoi : non tenté. La configuration email est incomplète.';
-  } else {
-    message += ' Envoi : état indéterminé.';
+  const episodeId = Number(opened);
+  if (repositories.episodes.getById(episodeId) === null) {
+    return null;
   }
-  return { kind: delivery === 'accepted' ? 'ok' : 'warn', message };
+  const delivery = emailService.getDeliveryState(episodeId);
+  const base = `Épisode n° ${episodeId} déclaré.`;
+  if (delivery.status === 'accepted') {
+    return { kind: 'ok', message: `${base} Envoi : accepté par le fournisseur.` };
+  }
+  if (delivery.status === 'refused') {
+    return {
+      kind: 'warn',
+      message: `${base} Envoi : refusé. Le motif du fournisseur est enregistré ci-dessous.`,
+    };
+  }
+  if (delivery.status === 'not_attempted') {
+    return {
+      kind: 'warn',
+      message: `${base} Envoi : non tenté (configuration email incomplète ou invalide).`,
+    };
+  }
+  if (delivery.pending === true) {
+    return {
+      kind: 'warn',
+      message: `${base} Envoi : état indéterminé (tentative réservée mais non terminée).`,
+    };
+  }
+  return { kind: 'warn', message: `${base} Envoi : aucune tentative enregistrée.` };
 }
 
 /**
@@ -159,19 +200,25 @@ function dashboardFlash(searchParams) {
  */
 export function registerOperatorUiRoutes(
   app,
-  { repositories, episodeService, emailService, emailSettings, tokenSigner } = {},
+  {
+    repositories,
+    alertEpisodeService,
+    emailService,
+    emailSettings,
+    tokenSigner,
+  } = {},
 ) {
   if (
     !repositories ||
     !repositories.episodes ||
     !repositories.emailAttempts ||
-    !episodeService ||
+    !alertEpisodeService ||
     !emailService ||
     !emailSettings ||
     !tokenSigner
   ) {
     throw new TypeError(
-      'registerOperatorUiRoutes requires repositories, episodeService, emailService, emailSettings and tokenSigner.',
+      'registerOperatorUiRoutes requires repositories, alertEpisodeService, emailService, emailSettings and tokenSigner.',
     );
   }
 
@@ -190,7 +237,7 @@ export function registerOperatorUiRoutes(
       .map((episode) => ({
         ...episode,
         rules: repositories.episodes.getRules(episode.id),
-        attempt: repositories.emailAttempts.findByEpisodeId(episode.id),
+        delivery: emailService.getDeliveryState(episode.id),
       }));
     return { episodes, attempts };
   }
@@ -206,7 +253,7 @@ export function registerOperatorUiRoutes(
       200,
       renderDashboardPage({
         banner: banner(),
-        flash: dashboardFlash(ctx.url.searchParams),
+        flash: dashboardFlash(ctx.url.searchParams, { repositories, emailService }),
         configuration: configuration(),
         episodes,
         attempts,
@@ -289,7 +336,7 @@ export function registerOperatorUiRoutes(
 
     let opened;
     try {
-      opened = episodeService.openEpisode(parsed.input);
+      opened = await alertEpisodeService.openAndNotify(parsed.input);
     } catch (error) {
       ctx.logger.warn('operator_episode_rejected', { errorName: error?.name ?? 'Error' });
       ctx.sendHtml(
@@ -305,19 +352,24 @@ export function registerOperatorUiRoutes(
       return;
     }
 
-    const delivery = await emailService.deliverEpisode(opened);
-    const status = typeof delivery?.status === 'string' ? delivery.status : 'pending';
+    const status =
+      typeof opened.delivery?.status === 'string' ? opened.delivery.status : 'pending';
     ctx.logger.info('operator_episode_opened', {
       episodeId: opened.episode.id,
       deliveryStatus: status,
     });
-    ctx.redirect(`/?opened=${opened.episode.id}&delivery=${encodeURIComponent(status)}`);
+    // Redirect with the episode id only: the dashboard reads the persisted
+    // attempt or claim and never trusts a delivery state carried in the URL.
+    ctx.redirect(`/?opened=${opened.episode.id}`);
   });
 
   app.post('/email/test', async (ctx) => {
     const result = await emailService.sendTestEmail();
     const status = typeof result?.status === 'string' ? result.status : 'pending';
     ctx.logger.info('operator_test_email_requested', { deliveryStatus: status });
-    ctx.redirect(`/?test=${encodeURIComponent(status)}`);
+    const attemptId = Number.isInteger(result?.attemptId) ? result.attemptId : null;
+    // A recorded attempt id is the only thing the dashboard accepts; if the
+    // result could not be persisted, no state is claimed from the URL.
+    ctx.redirect(attemptId === null ? '/' : `/?test=${attemptId}`);
   });
 }
