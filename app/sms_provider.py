@@ -37,6 +37,11 @@ RESPONSE_EXCERPT_LENGTH = 300
 USER_AGENT = "episode-alerts-sms/1.0"
 JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 
+# Identity of the shipped adapter. It is part of the verification fingerprint:
+# replacing or changing the adapter must invalidate a previous successful test.
+ADAPTER_ID = "http-json"
+ADAPTER_VERSION = 1
+
 _PLACEHOLDER_RE = re.compile(r"\{\{(to|sender|message)\}\}")
 
 
@@ -152,6 +157,9 @@ def load_sms_provider(
 
 class HttpJsonSmsProvider:
     """Generic HTTP-JSON SMS adapter driven entirely by configuration."""
+
+    adapter_id = ADAPTER_ID
+    adapter_version = ADAPTER_VERSION
 
     def __init__(
         self,

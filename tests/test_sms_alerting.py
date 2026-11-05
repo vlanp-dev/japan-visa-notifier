@@ -25,7 +25,7 @@ from app.sms_provider import (
     SmsSendResult,
 )
 from app.web import create_app
-from tests.support import null_logger, temporary_config
+from tests.support import WSGIClient, null_logger, temporary_config
 
 SMS_SETTINGS = {
     "provider": "free-test",
@@ -297,6 +297,53 @@ class SmsAlertingTests(unittest.TestCase):
         )
         self.assertEqual(len(list(self.outbox.glob("*.eml"))), 1)
         self.assertEqual(service.resend(episode).status, "sent")
+
+    def test_create_app_binds_the_sms_service_into_an_injected_alert_service(
+        self,
+    ) -> None:
+        provider = FakeSmsProvider()
+        alerts = AlertService(
+            self.config,
+            self.episodes,
+            self.deliveries,
+            sms=None,
+            logger=null_logger(),
+            clock=self.clock,
+        )
+
+        app = create_app(
+            self.config,
+            database=self.database,
+            episodes=self.episodes,
+            deliveries=self.deliveries,
+            alerts=alerts,
+            sms_provider=provider,
+            logger=null_logger(),
+            clock=self.clock,
+        )
+
+        # Episode opening must use the very same channel shown and tested by
+        # the web interface, even when the alert service was injected.
+        self.assertIsNotNone(app.alerts.sms)
+        self.assertIs(app.sms, app.alerts.sms)
+
+        client = WSGIClient(app)
+        client.get("/")
+        token = app.csrf.token_for(client.cookies["alerts_session"])
+        tested = client.post_form("/sms/test", {"csrf_token": token})
+        self.assertEqual(tested.status, 303)
+        self.assertIn("notice=sms_test_sent", tested.header("Location"))
+
+        episode = app.alerts.create_episode(
+            change_nature="Ouverture de la pêche",
+            page_url=PAGE_URL,
+        )
+
+        self.assertEqual(
+            self._episode_attempts(episode),
+            [("email", "alert", "sent"), ("sms", "alert", "sent")],
+        )
+        self.assertEqual(len(provider.calls), 2)
 
     def test_create_app_loads_the_configured_provider_without_injection(
         self,

@@ -34,7 +34,7 @@ from .repositories import (
     SmsChannelStateRepository,
 )
 from .sms_message import compose_sms
-from .sms_provider import load_sms_provider
+from .sms_provider import ADAPTER_ID, ADAPTER_VERSION, load_sms_provider
 from .util import format_timestamp, mask_sms, sanitize_error, utcnow
 
 UNSET = object()
@@ -56,16 +56,23 @@ INVALID_CONFIGURATION_ERROR = "Configuration SMS invalide : envoi impossible."
 TEST_NATURE = "Test du canal SMS"
 SMS_MESSAGE_ERROR = "Échec de l'envoi du SMS."
 
+DEFAULT_SMS_ADAPTER = f"{ADAPTER_ID}/{ADAPTER_VERSION}"
 
-def sms_config_fingerprint(config: SmsConfig) -> str:
+
+def sms_config_fingerprint(
+    config: SmsConfig, *, adapter: str = DEFAULT_SMS_ADAPTER
+) -> str:
     """Return a stable digest of every provider-relevant setting.
 
     The credential is hashed on its own before being included, so it is never
-    part of a fingerprint an operator could read or compare.
+    part of a fingerprint an operator could read or compare. The adapter
+    identity/version is included too, so swapping the adapter implementation
+    invalidates a previous verification even when the settings are identical.
     """
 
     credential = config.credential or ""
     material = {
+        "adapter": adapter,
         "provider": config.provider,
         "url": config.url,
         "method": config.method,
@@ -188,25 +195,38 @@ class SmsChannelService:
                 )
                 provider = None
         self.provider = provider
+        self._invalidate_stale_state()
+
+    def _invalidate_stale_state(self) -> None:
+        """Persist invalidation as soon as a stale fingerprint is observed.
+
+        Verification is valid for one configuration and one adapter only. If
+        this service starts with a different configuration, the previous row
+        must be cleared immediately: otherwise reverting to the old settings
+        later would resurrect the old verification without a new test.
+        """
+
+        fingerprint = self._fingerprint()
+        row = self.states.get()
+        if row is not None and row.fingerprint != fingerprint:
+            self.states.ensure(fingerprint)
 
     def status(self) -> SmsChannelStatus:
         """Derive the explicit state from configuration and persisted state.
 
-        This is a read-only view: rendering the dashboard never creates or
-        resets the persisted fingerprint. A configuration change still
-        invalidates the previous verification because the stored fingerprint
-        no longer matches, and persistence happens only when a test or a real
-        alert attempt is recorded.
+        Rendering the dashboard never creates a state row. When a row exists
+        but its fingerprint no longer matches the current configuration (or
+        adapter), the stale row is reset immediately: verification belongs to
+        one exact configuration and must not be resurrected if the operator
+        later reverts to an earlier set of settings.
         """
 
         sms = self.config.sms
-        fingerprint = sms_config_fingerprint(sms)
+        fingerprint = self._fingerprint()
         configuration_error = self._configuration_error()
-        row: SmsChannelState | None = None
-        if configuration_error is None:
-            row = self.states.get()
-            if row is not None and row.fingerprint != fingerprint:
-                row = None
+        row: SmsChannelState | None = self.states.get()
+        if row is not None and row.fingerprint != fingerprint:
+            row = self.states.ensure(fingerprint)
 
         if configuration_error is not None:
             state = SMS_STATE_UNCONFIGURED
@@ -242,7 +262,7 @@ class SmsChannelService:
         """
 
         started = time.perf_counter()
-        fingerprint = sms_config_fingerprint(self.config.sms)
+        fingerprint = self._fingerprint()
         refusal = self._configuration_error()
         if refusal is not None:
             return self._record_failure(
@@ -432,6 +452,27 @@ class SmsChannelService:
             self.states.record_alert(
                 fingerprint=fingerprint, status=status, error=error, at=moment
             )
+
+    def _fingerprint(self) -> str:
+        return sms_config_fingerprint(
+            self.config.sms, adapter=self._adapter_identifier()
+        )
+
+    def _adapter_identifier(self) -> str:
+        """Identify the adapter implementation, not just its settings."""
+
+        provider = self.provider
+        if provider is None:
+            return DEFAULT_SMS_ADAPTER
+        adapter_id = getattr(provider, "adapter_id", "") or ADAPTER_ID
+        adapter_version = (
+            getattr(provider, "adapter_version", "") or ADAPTER_VERSION
+        )
+        provider_type = type(provider)
+        return (
+            f"{adapter_id}/{adapter_version}:"
+            f"{provider_type.__module__}.{provider_type.__qualname__}"
+        )
 
     def _configuration_error(self) -> str | None:
         if self.config.sms_configuration_error:

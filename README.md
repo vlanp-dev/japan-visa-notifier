@@ -184,9 +184,12 @@ sous le logger `sms`. Les quatre états explicites du canal sont :
    **Actif et vérifié**. En cas d'échec, le bandeau l'indique et le détail de
    l'erreur apparaît dans l'état du canal ; corriger la configuration puis
    recommencer.
-5. Toute modification d'un paramètre du fournisseur invalide immédiatement la
-   vérification : l'état repasse à **Inactif — non vérifié** et un nouveau test
-   réussi est nécessaire avant tout envoi réel.
+5. Toute modification d'un paramètre du fournisseur ou de l'adaptateur
+   (identifiant et version font partie de l'empreinte de vérification)
+   invalide immédiatement la vérification : l'état repasse à **Inactif — non
+   vérifié** et un nouveau test réussi est nécessaire avant tout envoi réel.
+   Revenir à une configuration précédemment vérifiée ne rétablit pas
+   l'ancienne vérification.
 
 ## Tests
 

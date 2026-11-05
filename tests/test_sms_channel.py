@@ -62,6 +62,12 @@ class FakeSmsProvider:
         )
 
 
+class AlternativeSmsProvider(FakeSmsProvider):
+    """A different adapter implementation with identical settings."""
+
+    name = "free-test"
+
+
 class SmsChannelServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self._holder = tempfile.TemporaryDirectory()
@@ -353,6 +359,48 @@ class SmsChannelServiceTests(unittest.TestCase):
         self.assertIsNone(status.last_test_status)
         self.assertIsNone(status.last_alert_status)
 
+    def test_reverting_a_configuration_change_does_not_restore_verification(
+        self,
+    ) -> None:
+        service = self._service(self._config(SMS_SETTINGS), FakeSmsProvider())
+        self.assertEqual(service.send_test().status, "sent")
+        self.assertEqual(service.status().state, SMS_STATE_VERIFIED)
+
+        changed_config = self._config(
+            dict(SMS_SETTINGS, credential="another-secret")
+        )
+        changed_service = self._service(changed_config, FakeSmsProvider())
+        self.assertEqual(changed_service.status().state, SMS_STATE_UNVERIFIED)
+
+        # Observing configuration B reset the persisted state. Reverting to A
+        # without a new successful test must stay unverified.
+        reverted_service = self._service(
+            self._config(SMS_SETTINGS), FakeSmsProvider()
+        )
+        status = reverted_service.status()
+        self.assertEqual(status.state, SMS_STATE_UNVERIFIED)
+        self.assertFalse(status.active)
+        self.assertIsNone(status.verified_at)
+
+        self.assertEqual(reverted_service.send_test().status, "sent")
+        self.assertEqual(reverted_service.status().state, SMS_STATE_VERIFIED)
+
+    def test_adapter_change_invalidates_verification_without_setting_change(
+        self,
+    ) -> None:
+        service = self._service(self._config(SMS_SETTINGS), FakeSmsProvider())
+        self.assertEqual(service.send_test().status, "sent")
+        self.assertEqual(service.status().state, SMS_STATE_VERIFIED)
+
+        changed_adapter = self._service(
+            self._config(SMS_SETTINGS), AlternativeSmsProvider()
+        )
+
+        status = changed_adapter.status()
+        self.assertEqual(status.state, SMS_STATE_UNVERIFIED)
+        self.assertFalse(status.active)
+        self.assertIsNone(status.verified_at)
+
     def test_failed_alert_after_verification_is_visible_in_delivery_log(self) -> None:
         provider = FakeSmsProvider()
         service = self._service(self._config(SMS_SETTINGS), provider)
@@ -456,6 +504,14 @@ class SmsFingerprintTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotIn("secret-value", first)
         self.assertEqual(len(first), 64)
+
+    def test_adapter_identity_is_part_of_the_fingerprint(self) -> None:
+        config = self._sms()
+
+        first = sms_config_fingerprint(config, adapter="http-json/1")
+        second = sms_config_fingerprint(config, adapter="http-json/2")
+
+        self.assertNotEqual(first, second)
 
     def test_every_provider_relevant_setting_changes_the_fingerprint(self) -> None:
         base = self._sms()

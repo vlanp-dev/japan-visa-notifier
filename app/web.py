@@ -470,6 +470,7 @@ def create_app(
             sms = _build_sms_channel(
                 config, deliveries, database, sms_provider, logger, clock
             )
+        _bind_sms_channel(alerts, sms, logger)
     app = Application(
         config,
         database,
@@ -500,6 +501,28 @@ def _build_sms_channel(
         logger=logger,
         clock=clock,
     )
+
+
+def _bind_sms_channel(
+    alerts: AlertService, sms: SmsChannelService | None, logger
+) -> None:
+    """Ensure episode alerts use the same SMS service as the web interface.
+
+    ``Application`` can read the channel from the alert service; an injected
+    alert service built without one must therefore receive the service created
+    here. Otherwise the dashboard and ``/sms/test`` would use a different
+    channel than episode opening, and a verified channel could still never send
+    an alert.
+    """
+
+    if sms is None or getattr(alerts, "sms", None) is sms:
+        return
+    try:
+        alerts.sms = sms
+    except AttributeError:
+        (logger or get_logger("web")).warning(
+            "Injected alert service does not expose a writable SMS channel"
+        )
 
 
 def _specificity(pattern: str) -> int:
