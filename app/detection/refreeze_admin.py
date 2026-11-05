@@ -169,6 +169,10 @@ def _page_content(
             f"<dd><code>{escape(reference.content_hash)}</code></dd>"
         )
         parts.append(
+            "<dt>Type de contenu</dt>"
+            f"<dd>{escape(reference.content_type or '—')}</dd>"
+        )
+        parts.append(
             f"<dt>Capturée le</dt><dd>{escape(reference.captured_at)}</dd>"
         )
         parts.append(

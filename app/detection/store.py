@@ -32,6 +32,18 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+class ReferenceConflictError(RuntimeError):
+    """The current reference changed while a check was evaluating it."""
+
+    def __init__(self, expected_id: int | None, actual_id: int | None):
+        self.expected_id = expected_id
+        self.actual_id = actual_id
+        super().__init__(
+            "the current reference changed during the check "
+            f"(expected {expected_id}, found {actual_id})"
+        )
+
+
 @dataclass(frozen=True)
 class ReferenceSeed:
     """Values needed to persist one immutable page reference."""
@@ -43,6 +55,7 @@ class ReferenceSeed:
     http_status: int | None = None
     etag: str | None = None
     last_modified: str | None = None
+    content_type: str | None = None
     previous_reference_id: int | None = None
 
 
@@ -57,6 +70,7 @@ class ReferenceRecord:
     http_status: int | None
     etag: str | None
     last_modified: str | None
+    content_type: str | None
     captured_at: str
     operator_label: str
     previous_reference_id: int | None
@@ -101,6 +115,9 @@ class RefreezeEventRecord:
     operator_label: str
     message: str | None
     created_at: str
+
+
+_UNSET = object()
 
 
 class Store:
@@ -237,6 +254,15 @@ class Store:
             ).fetchone()
         return _reference_from_row(row) if row is not None else None
 
+    def current_reference_id(self) -> int | None:
+        """Return only the current reference id, without decoding its snapshot."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM page_references WHERE is_current = 1"
+            ).fetchone()
+        return int(row["id"]) if row is not None else None
+
     def get_reference(self, reference_id: int) -> ReferenceRecord | None:
         with self._connection() as connection:
             row = connection.execute(
@@ -333,17 +359,30 @@ class Store:
         duration_ms: int | None = None,
         results: Iterable[RuleResult] = (),
         new_reference: ReferenceSeed | None = None,
+        expected_reference_id: int | None | object = _UNSET,
     ) -> CheckRecord:
         """Persist one completed check with its results in one transaction.
 
         ``new_reference`` captures the initial reference and the check together,
         so a successful first retrieval can never leave a check pointing at a
-        missing reference.
+        missing reference.  When ``expected_reference_id`` is provided, the
+        write is a compare-and-swap: if the current reference changed while the
+        page was being evaluated, :class:`ReferenceConflictError` is raised and
+        nothing is written.  Pass ``None`` to require that no reference exists.
         """
 
         rule_results = tuple(results)
         now = utc_now_iso()
         with self._connection() as connection, connection:
+            if expected_reference_id is not _UNSET:
+                row = connection.execute(
+                    "SELECT id FROM page_references WHERE is_current = 1"
+                ).fetchone()
+                actual_id = int(row["id"]) if row is not None else None
+                if actual_id != expected_reference_id:
+                    raise ReferenceConflictError(
+                        expected_reference_id, actual_id
+                    )
             if new_reference is not None:
                 reference_id = _insert_reference(
                     connection, new_reference, supersede=True
@@ -513,9 +552,9 @@ def _insert_reference(
         """
         INSERT INTO page_references
             (target_url, content_hash, normalized_snapshot, http_status, etag,
-             last_modified, captured_at, operator_label, previous_reference_id,
-             is_current, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             last_modified, content_type, captured_at, operator_label,
+             previous_reference_id, is_current, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             seed.target_url,
@@ -524,6 +563,7 @@ def _insert_reference(
             seed.http_status,
             seed.etag,
             seed.last_modified,
+            seed.content_type,
             seed.captured_at,
             seed.operator_label,
             previous_id,
@@ -574,6 +614,7 @@ def _reference_from_row(row: Any) -> ReferenceRecord:
         http_status=row["http_status"],
         etag=row["etag"],
         last_modified=row["last_modified"],
+        content_type=row["content_type"],
         captured_at=row["captured_at"],
         operator_label=row["operator_label"],
         previous_reference_id=row["previous_reference_id"],
@@ -622,6 +663,7 @@ def _positive_limit(limit: int) -> int:
 
 __all__ = [
     "CheckRecord",
+    "ReferenceConflictError",
     "ReferenceRecord",
     "ReferenceSeed",
     "RefreezeEventRecord",

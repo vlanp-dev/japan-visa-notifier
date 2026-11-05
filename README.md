@@ -25,7 +25,10 @@ contrôle en cours se terminer.
 Le fichier `config/app.json` et le répertoire `var/` sont ignorés par Git.
 Le schéma SQLite est créé ou complété de façon idempotente au démarrage ; les
 contrôles, résultats par règle, références et refigements survivent aux
-redémarrages.
+redémarrages. Les migrations de détection sont suivies dans la table
+`detection_schema_migrations` : le service ne modifie jamais `PRAGMA
+user_version`, qui reste disponible pour un autre service partageant le même
+fichier.
 
 ### Tests
 
@@ -125,7 +128,10 @@ de ce type sont explicitement refusés par la validation.
 L'opérateur peut ajouter une règle d'un type pris en charge, modifier son nom,
 ses paramètres et son état, ou l'activer/désactiver depuis `/rules`. Une
 modification prend effet au contrôle suivant ; elle ne touche jamais la
-référence figée et ne crée ni contrôle ni signal de changement.
+référence figée et ne crée ni contrôle ni signal de changement. La référence
+conserve une structure de blocs indépendante des paramètres : l'ancre, le
+libellé et la fenêtre courants sont réappliqués à la référence comme à la page
+au moment de chaque évaluation.
 
 ## Normalisation du contenu
 
@@ -169,7 +175,7 @@ reste utilisable. Les catégories d'échec sont :
 | `empty_body` | Corps vide |
 | `unsupported_content_type` | Type différent de `text/html` ou `application/xhtml+xml` |
 | `oversized_response` | Corps supérieur à `max_response_bytes` |
-| `unparseable_content` | Corps indécodable ou instantané de référence illisible |
+| `unparseable_content` | Corps indécodable, page sans contenu visible exploitable ou instantané de référence illisible |
 
 ## Discipline de récupération
 

@@ -70,6 +70,7 @@ def success(html: str) -> FetchResult:
         http_status=200,
         etag='"closed-2026"',
         last_modified="Wed, 04 Nov 2026 09:30:00 GMT",
+        content_type="text/html",
         final_url=BASE_URL,
     )
 
@@ -137,6 +138,7 @@ class DashboardTestCase(unittest.TestCase):
             operator_label="opérateur test",
             captured_at="2026-11-04T09:30:00+00:00",
             http_status=200,
+            content_type="text/html",
         )
 
 
@@ -201,7 +203,10 @@ class DashboardOutcomeTests(DashboardTestCase):
 
         reference = self.store.current_reference()
         assert reference is not None
+        self.assertEqual(reference.content_type, "text/html")
         self.assertIn(reference.content_hash, text)
+        self.assertIn("Type de contenu", text)
+        self.assertIn("text/html", text)
         # The page's script body is never part of the rendered dashboard.
         self.assertNotIn("SCRIPT_CONTENT", text)
 

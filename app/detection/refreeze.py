@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from ..config import Config
 from ..logging_setup import StructuredLogger
 from .fetch import FailureCategory, FetchFailure, FetchResult, Fetcher
+from .locking import reference_lock
 from .store import (
     ReferenceRecord,
     ReferenceSeed,
@@ -80,42 +81,49 @@ class RefreezeService:
             if operator_label is not None
             else self._config.operator_label
         )
-        previous = self._store.current_reference()
-        result = self._retrieve()
+        # Serialize with the check loop.  A check that is already running
+        # finishes first, so its result can never be recorded against the
+        # reference this refreeze is about to replace.
+        with reference_lock(self._store.database_path):
+            previous = self._store.current_reference()
+            result = self._retrieve()
 
-        if result.failure is not None or result.snapshot is None:
-            return self._record_failure(result, operator, previous)
+            if result.failure is not None or result.snapshot is None:
+                return self._record_failure(result, operator, previous)
 
-        seed = ReferenceSeed(
-            target_url=self._config.target_url,
-            snapshot=result.snapshot,
-            operator_label=operator,
-            captured_at=utc_now_iso(),
-            http_status=result.http_status,
-            etag=result.etag,
-            last_modified=result.last_modified,
-            previous_reference_id=previous.id if previous is not None else None,
-        )
-        reference, event = self._store.refreeze_reference(
-            seed,
-            operator_label=operator,
-            message=SUCCESS_MESSAGE,
-        )
-        self._log(
-            "refreeze_completed",
-            success=True,
-            event_id=event.id,
-            reference_id=reference.id,
-            previous_reference_id=(
-                previous.id if previous is not None else None
-            ),
-        )
-        return RefreezeResult(
-            success=True,
-            event=event,
-            previous_reference=previous,
-            reference=reference,
-        )
+            seed = ReferenceSeed(
+                target_url=self._config.target_url,
+                snapshot=result.snapshot,
+                operator_label=operator,
+                captured_at=utc_now_iso(),
+                http_status=result.http_status,
+                etag=result.etag,
+                last_modified=result.last_modified,
+                content_type=result.content_type,
+                previous_reference_id=(
+                    previous.id if previous is not None else None
+                ),
+            )
+            reference, event = self._store.refreeze_reference(
+                seed,
+                operator_label=operator,
+                message=SUCCESS_MESSAGE,
+            )
+            self._log(
+                "refreeze_completed",
+                success=True,
+                event_id=event.id,
+                reference_id=reference.id,
+                previous_reference_id=(
+                    previous.id if previous is not None else None
+                ),
+            )
+            return RefreezeResult(
+                success=True,
+                event=event,
+                previous_reference=previous,
+                reference=reference,
+            )
 
     # -- internals ------------------------------------------------------
 

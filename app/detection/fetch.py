@@ -107,6 +107,7 @@ class FetchResult:
     http_status: int | None = None
     etag: str | None = None
     last_modified: str | None = None
+    content_type: str | None = None
     final_url: str = ""
     redirects: int = 0
     elapsed_seconds: float = 0.0
@@ -132,6 +133,7 @@ class _Hop:
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     charset: str | None = None
+    content_type: str | None = None
     failure: FetchFailure | None = None
 
 
@@ -425,6 +427,7 @@ class Fetcher:
                 http_status=hop.status,
                 etag=hop.headers.get("etag"),
                 last_modified=hop.headers.get("last-modified"),
+                content_type=hop.content_type,
                 final_url=current_url,
                 redirects=redirects,
                 elapsed_seconds=time.monotonic() - started,
@@ -500,6 +503,7 @@ class Fetcher:
                 headers=headers,
                 body=body,
                 charset=charset,
+                content_type=media_type,
             )
         finally:
             if response is not None:
@@ -599,6 +603,7 @@ class Fetcher:
             http_status=hop.status,
             etag=hop.headers.get("etag"),
             last_modified=hop.headers.get("last-modified"),
+            content_type=hop.content_type,
             final_url=final_url,
             redirects=redirects,
             elapsed_seconds=time.monotonic() - started,

@@ -5,7 +5,9 @@ import json
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from app.config import Config
 from app.detection.canonical import CanonicalSnapshot, canonicalize_page
@@ -29,7 +31,7 @@ from app.detection.service import (
     ChangeEvent,
     CheckService,
 )
-from app.detection.store import Store
+from app.detection.store import ReferenceSeed, Store, utc_now_iso
 from app.logging_setup import StructuredLogger
 from app.db import connect
 
@@ -55,6 +57,7 @@ def success(snapshot: CanonicalSnapshot) -> FetchResult:
         http_status=200,
         etag='"closed-2026"',
         last_modified="Wed, 04 Nov 2026 09:30:00 GMT",
+        content_type="text/html",
         final_url=BASE_URL,
     )
 
@@ -149,6 +152,7 @@ class InitialCaptureTests(CheckServiceTestCase):
         assert current is not None
         self.assertEqual(current.content_hash, snapshot_of(fixture_html()).digest())
         self.assertEqual(current.operator_label, "opérateur")
+        self.assertEqual(current.content_type, "text/html")
 
         check = service.store.latest_check()
         assert check is not None
@@ -254,6 +258,43 @@ class ChangedContentTests(CheckServiceTestCase):
         self.assertEqual(run.outcome, OUTCOME_CHANGED)
         self.assertEqual(run.triggered_rule_ids, (RULE_ID_NEW_ELEMENT,))
         self.assertEqual(len(self.events), 1)
+
+    def test_editing_timestamp_window_takes_effect_on_the_next_check(self) -> None:
+        html = (
+            "<html><body><p>Dernière mise à jour :"
+            + "x" * 80
+            + " 4 novembre 2026 à 09 h 30</p></body></html>"
+        )
+        changed = html.replace("09 h 30", "10 h 15")
+        service = self.make_service(
+            success(snapshot_of(html)),
+            success(snapshot_of(changed)),
+        )
+        service.run_once()
+        reference = service.store.current_reference()
+        assert reference is not None
+        self.assertTrue(reference.to_snapshot().timestamps)
+
+        rule = service.store.get_rule(RULE_ID_UPDATE_TIMESTAMP)
+        assert rule is not None
+        service.store.update_rule(
+            replace(
+                rule,
+                parameters={
+                    "label": rule.parameters["label"],
+                    "window": 10,
+                },
+            )
+        )
+
+        run = service.run_once()
+
+        # The stored reference is re-extracted with the new window, so the
+        # distant timestamp is no longer associated with the label.
+        statuses = {result.rule_id: result.status for result in run.results}
+        self.assertEqual(statuses[RULE_ID_UPDATE_TIMESTAMP], STATUS_NOT_EVALUATED)
+        self.assertEqual(run.outcome, OUTCOME_UNCHANGED)
+        self.assertEqual(self.events, [])
 
     def test_disabled_rule_does_not_produce_a_change(self) -> None:
         changed_html = fixture_html().replace(
@@ -388,6 +429,23 @@ class ControlFailureTests(CheckServiceTestCase):
                 self.assertNotEqual(check.outcome, "changed")
                 self.assertEqual(self.events, [])
 
+    def test_empty_snapshot_is_a_control_failure_not_a_change(self) -> None:
+        service = self.make_service(
+            FetchResult(
+                snapshot=CanonicalSnapshot(text="", blocks=()),
+                http_status=200,
+                content_type="text/html",
+            )
+        )
+
+        run = service.run_once()
+
+        self.assertEqual(run.outcome, OUTCOME_CONTROL_FAILURE)
+        self.assertEqual(run.failure_category, FailureCategory.UNPARSEABLE_CONTENT)
+        self.assertFalse(run.changed)
+        self.assertEqual(self.events, [])
+        self.assertIsNone(service.store.current_reference())
+
     def test_a_fetcher_exception_is_treated_as_a_network_failure(self) -> None:
         class ExplodingFetcher:
             def fetch(self) -> FetchResult:
@@ -481,6 +539,41 @@ class CycleDisciplineTests(CheckServiceTestCase):
             service.store.list_checks(limit=200)[-1].reason,
             REASON_REFERENCE_INITIALIZED,
         )
+
+    def test_superseded_reference_never_records_a_stale_change(self) -> None:
+        service = self.make_service(success(snapshot_of(fixture_html())))
+        service.run_once()
+        checks_before = self.check_count()
+
+        changed_html = fixture_html().replace("09 h 30", "10 h 15")
+        service._fetcher = SequenceFetcher(success(snapshot_of(changed_html)))  # noqa: SLF001
+
+        from app.detection import service as service_module
+
+        original_evaluate = service_module.evaluate
+
+        def evaluate_after_refreeze(*args, **kwargs):
+            service.store.save_reference(
+                ReferenceSeed(
+                    target_url=BASE_URL,
+                    snapshot=snapshot_of(variant_html()),
+                    operator_label="opérateur",
+                    captured_at=utc_now_iso(),
+                )
+            )
+            return original_evaluate(*args, **kwargs)
+
+        with patch(
+            "app.detection.service.evaluate",
+            side_effect=evaluate_after_refreeze,
+        ):
+            run = service.run_once()
+
+        self.assertTrue(run.skipped)
+        self.assertEqual(run.reason, "reference_changed")
+        self.assertFalse(run.changed)
+        self.assertEqual(self.check_count(), checks_before)
+        self.assertEqual(self.events, [])
 
     def test_rules_and_reference_survive_a_restart(self) -> None:
         first = self.make_service(success(snapshot_of(fixture_html())))

@@ -273,6 +273,8 @@ def _reference_content(reference: ReferenceRecord | None) -> list[str]:
         f"<dt>Identifiant</dt><dd>{escape(reference.id)}</dd>"
         "<dt>Empreinte SHA-256</dt>"
         f"<dd><code>{escape(reference.content_hash)}</code></dd>"
+        "<dt>Type de contenu</dt>"
+        f"<dd>{escape(reference.content_type or '—')}</dd>"
         f"<dt>Capturée le</dt><dd>{escape(reference.captured_at)}</dd>"
         f"<dt>Opérateur</dt><dd>{escape(reference.operator_label)}</dd>"
         "</dl>"

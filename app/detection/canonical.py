@@ -8,15 +8,20 @@ standard :mod:`html.parser` only.
 A snapshot contains:
 
 * ``text``: normalized visible text, one block per line;
-* ``closure_blocks``: the nearest blocks containing the configured anchor;
-* ``timestamps``: displayed date/time values found next to the configured
-  label, inside a bounded window;
+* ``blocks``: a parameter-independent block tree (tag, ordered text/child
+  parts, parent index) from which closure announcements and timestamps can be
+  re-extracted with the *current* rule parameters;
+* ``closure_blocks``: the closure announcement regions found with the default
+  anchor, kept as a convenience view;
+* ``timestamps``: displayed date/time values found next to the default label,
+  kept as a convenience view;
 * ``links``: stable fingerprints of absolute HTTP(S) links;
 * ``documents``: stable fingerprints of document links (PDF, office files);
 * ``times``: stable fingerprints of ``<time>`` elements.
 
 Collections preserve document order.  Serialization is deterministic, so two
-identical pages produce byte-identical JSON.
+identical pages produce byte-identical JSON.  Evaluation re-extracts rules from
+``blocks`` so editing a rule never requires refreezing the reference.
 """
 
 from __future__ import annotations
@@ -31,12 +36,21 @@ from html.parser import HTMLParser
 from typing import Any, Mapping
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 DEFAULT_CLOSURE_ANCHOR = "Complet 2026"
 DEFAULT_TIMESTAMP_LABEL = "mise à jour"
 DEFAULT_TIMESTAMP_WINDOW = 160
 DEFAULT_EXCERPT_LIMIT = 160
+
+#: A closure announcement is the smallest enclosing region around the anchor
+#: whose visible text stays within this bound.  The page structure itself is
+#: stored, so this bound is independent of any rule parameter.
+MAX_CLOSURE_REGION_CHARS = 400
+
+#: Structural roots are never used as an announcement region: they contain the
+#: whole page and would make every change look like an announcement change.
+ROOT_BLOCK_TAGS = frozenset({"html", "body"})
 
 #: Tags whose subtree is never visible text.
 SKIP_ELEMENTS = frozenset({"head", "noscript", "script", "style", "template"})
@@ -310,10 +324,60 @@ class TimeFingerprint:
 
 
 @dataclass(frozen=True)
+class Block:
+    """One text block, stored independently of any rule parameter.
+
+    ``parts`` preserves document order.  A string is an inline text run and an
+    integer is the index of a nested block; joining them reconstructs the
+    block's visible text.  ``parent`` is the index of the nearest enclosing
+    block, or ``-1``.  Because blocks are allocated in pre-order, a child index
+    is always greater than its parent's.
+    """
+
+    tag: str
+    parts: tuple[str | int, ...]
+    parent: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tag": self.tag,
+            "parts": list(self.parts),
+            "parent": self.parent,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Block":
+        _require_mapping(data, "block")
+        tag = _field_str(data, "tag", "block")
+        parent = data.get("parent")
+        if isinstance(parent, bool) or not isinstance(parent, int):
+            raise SnapshotFormatError("block.parent must be an integer")
+        raw_parts = data.get("parts")
+        if not isinstance(raw_parts, list):
+            raise SnapshotFormatError("block.parts must be a list")
+        parts: list[str | int] = []
+        for part in raw_parts:
+            if isinstance(part, str):
+                parts.append(part)
+            elif (
+                isinstance(part, bool)
+                or not isinstance(part, int)
+                or part < 0
+            ):
+                raise SnapshotFormatError(
+                    "block.parts entries must be text or block indices"
+                )
+            else:
+                parts.append(part)
+        return cls(tag=tag, parts=tuple(parts), parent=parent)
+
+
+@dataclass(frozen=True)
 class CanonicalSnapshot:
     """Deterministic, JSON-serializable view of one page retrieval."""
 
     text: str
+    blocks: tuple[Block, ...] = ()
     closure_blocks: tuple[ClosureCandidate, ...] = ()
     timestamps: tuple[TimestampCandidate, ...] = ()
     links: tuple[LinkFingerprint, ...] = ()
@@ -325,12 +389,39 @@ class CanonicalSnapshot:
         return {
             "version": self.version,
             "text": self.text,
+            "blocks": [item.to_dict() for item in self.blocks],
             "closure_blocks": [item.to_dict() for item in self.closure_blocks],
             "timestamps": [item.to_dict() for item in self.timestamps],
             "links": [item.to_dict() for item in self.links],
             "documents": [item.to_dict() for item in self.documents],
             "times": [item.to_dict() for item in self.times],
         }
+
+    def extract_closure_candidates(
+        self,
+        anchor: str,
+        excerpt_limit: int = DEFAULT_EXCERPT_LIMIT,
+    ) -> tuple[ClosureCandidate, ...]:
+        """Re-extract announcements for ``anchor`` from the stored blocks."""
+
+        return closure_candidates_for(
+            self.blocks, anchor, excerpt_limit=excerpt_limit
+        )
+
+    def extract_timestamp_candidates(
+        self,
+        label: str,
+        window: int,
+        excerpt_limit: int = DEFAULT_EXCERPT_LIMIT,
+    ) -> tuple[TimestampCandidate, ...]:
+        """Re-extract timestamps for ``label``/``window`` from stored blocks."""
+
+        return timestamp_candidates_for(
+            self.blocks,
+            label,
+            window,
+            excerpt_limit=excerpt_limit,
+        )
 
     def to_json(self) -> str:
         """Serialize deterministically so identical pages compare byte-equal."""
@@ -357,8 +448,11 @@ class CanonicalSnapshot:
             raise SnapshotFormatError(f"unsupported snapshot version: {version}")
 
         text = _field_str(data, "text", "snapshot")
+        blocks = _candidates(data, "blocks", Block.from_dict)
+        _validate_block_links(blocks)
         return cls(
             text=text,
+            blocks=blocks,
             closure_blocks=_candidates(
                 data, "closure_blocks", ClosureCandidate.from_dict
             ),
@@ -557,19 +651,29 @@ def canonicalize_page(
     root = parser.root
     visible_text = _canonical_text(_render_cached(root, render_cache))
 
+    blocks = _build_blocks(root)
+
+    # A 200 response that parses to nothing usable is a control failure, not a
+    # content change: there is no meaningful state to compare.  A page with
+    # only bare text and no block structure is treated the same way.
+    if not visible_text or not blocks:
+        raise CanonicalizationError("page has no usable visible structure")
+
+    block_texts = reconstruct_block_texts(blocks)
+
     anchor = _normalize_inline(closure_anchor)
-    closure_blocks = _closure_candidates(
-        root,
+    closure_blocks = closure_candidates_for(
+        blocks,
         anchor,
-        render_cache,
-        excerpt_limit,
+        excerpt_limit=excerpt_limit,
+        texts=block_texts,
     )
-    timestamps = _timestamp_candidates(
-        root,
+    timestamps = timestamp_candidates_for(
+        blocks,
         _normalize_inline(timestamp_label),
         timestamp_window,
-        render_cache,
-        excerpt_limit,
+        excerpt_limit=excerpt_limit,
+        texts=block_texts,
     )
     links, documents = _link_candidates(
         root,
@@ -581,6 +685,7 @@ def canonicalize_page(
 
     return CanonicalSnapshot(
         text=visible_text,
+        blocks=blocks,
         closure_blocks=closure_blocks,
         timestamps=timestamps,
         links=links,
@@ -607,33 +712,126 @@ def single_line_excerpt(
     return cleaned[: limit - 1].rstrip() + "…"
 
 
-def _closure_candidates(
-    root: _Element,
+def _build_blocks(root: _Element) -> tuple[Block, ...]:
+    """Build a parameter-independent block tree from the parsed document.
+
+    Each block stores its inline text runs and nested block indices in document
+    order.  Text belongs to exactly one block, so the snapshot stays bounded by
+    the page size instead of duplicating every ancestor's rendered text.
+    """
+
+    blocks: list[Block] = []
+
+    def walk(node: _Element, parent_index: int) -> list[str | int]:
+        parts: list[str | int] = []
+        buffer: list[str] = []
+
+        def flush() -> None:
+            if not buffer:
+                return
+            text = _normalize_inline("".join(buffer))
+            buffer.clear()
+            if text:
+                parts.append(text)
+
+        for child in node.children:
+            if isinstance(child, str):
+                buffer.append(
+                    _normalize_characters(child, keep_newlines=False)
+                )
+                continue
+            if child.tag in SKIP_ELEMENTS:
+                continue
+            if child.tag in BLOCK_ELEMENTS:
+                flush()
+                index = len(blocks)
+                # Reserve the slot before descending so children always have a
+                # greater index than their parent.
+                blocks.append(Block(tag=child.tag, parts=(), parent=parent_index))
+                child_parts = walk(child, index)
+                blocks[index] = Block(
+                    tag=child.tag,
+                    parts=tuple(child_parts),
+                    parent=parent_index,
+                )
+                parts.append(index)
+                continue
+            if child.tag == "br":
+                buffer.append(" ")
+                continue
+            # Inline element: splice its content into this block in order.
+            for part in walk(child, parent_index):
+                if isinstance(part, int):
+                    flush()
+                    parts.append(part)
+                else:
+                    buffer.append(part)
+        flush()
+        return parts
+
+    walk(root, -1)
+    return tuple(blocks)
+
+
+def reconstruct_block_texts(
+    blocks: tuple[Block, ...],
+) -> tuple[str, ...]:
+    """Return the visible text of every block, children included."""
+
+    texts = [""] * len(blocks)
+    # Children always have a greater index than their parent, so one reverse
+    # pass is enough and no recursion is needed.
+    for index in range(len(blocks) - 1, -1, -1):
+        pieces: list[str] = []
+        for part in blocks[index].parts:
+            if isinstance(part, int):
+                if 0 <= part < len(texts):
+                    pieces.append(texts[part])
+            else:
+                pieces.append(part)
+        texts[index] = _normalize_inline(" ".join(pieces))
+    return tuple(texts)
+
+
+def closure_candidates_for(
+    blocks: tuple[Block, ...],
     anchor: str,
-    render_cache: dict[int, str],
-    excerpt_limit: int,
+    *,
+    excerpt_limit: int = DEFAULT_EXCERPT_LIMIT,
+    texts: tuple[str, ...] | None = None,
 ) -> tuple[ClosureCandidate, ...]:
-    if not anchor:
+    """Find announcement regions for ``anchor`` in a stored block tree.
+
+    The region is the largest ancestor of an anchor-bearing block whose text
+    stays within :data:`MAX_CLOSURE_REGION_CHARS`; this includes a meaningful
+    sentence that sits in a sibling paragraph of the announcement container.
+    """
+
+    if not anchor or not blocks:
         return ()
+    block_texts = texts if texts is not None else reconstruct_block_texts(blocks)
+    matching = _matching_block_indices(block_texts, anchor)
     anchor_pattern = re.compile(re.escape(anchor), re.IGNORECASE)
-    blocks = _innermost_blocks(root, anchor, render_cache)
     seen: set[str] = set()
     candidates: list[ClosureCandidate] = []
-    for element, text in blocks:
+    for index in _innermost_indices(blocks, matching):
+        region = _closure_region_index(blocks, block_texts, matching, index)
+        text = block_texts[region]
         fingerprint = _fingerprint("closure", text)
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
         match = anchor_pattern.search(text)
         start = match.start() if match else 0
-        end = match.end() if match else 0
+        # Start just before the anchor and keep the following sentence(s): the
+        # announcement meaning usually sits after the closing headline.
         excerpt = single_line_excerpt(
-            text[max(0, start - 40) : min(len(text), end + 40)],
+            text[max(0, start - 40) : max(0, start - 40) + excerpt_limit],
             excerpt_limit,
         )
         candidates.append(
             ClosureCandidate(
-                tag=element.tag,
+                tag=blocks[region].tag,
                 fingerprint=fingerprint,
                 excerpt=excerpt,
             )
@@ -641,19 +839,30 @@ def _closure_candidates(
     return tuple(candidates)
 
 
-def _timestamp_candidates(
-    root: _Element,
+def timestamp_candidates_for(
+    blocks: tuple[Block, ...],
     label: str,
     window: int,
-    render_cache: dict[int, str],
-    excerpt_limit: int,
+    *,
+    excerpt_limit: int = DEFAULT_EXCERPT_LIMIT,
+    texts: tuple[str, ...] | None = None,
 ) -> tuple[TimestampCandidate, ...]:
-    if not label:
+    """Find timestamps next to ``label`` in a stored block tree.
+
+    Both the reference and the current snapshot are re-extracted with the
+    rule's current label and window, so editing them takes effect on the next
+    check without refreezing the reference.
+    """
+
+    if not label or not blocks:
         return ()
+    block_texts = texts if texts is not None else reconstruct_block_texts(blocks)
+    matching = _matching_block_indices(block_texts, label)
     label_pattern = re.compile(re.escape(label), re.IGNORECASE)
     seen: set[str] = set()
     candidates: list[TimestampCandidate] = []
-    for _element, text in _innermost_blocks(root, label, render_cache):
+    for index in _innermost_indices(blocks, matching):
+        text = block_texts[index]
         for match in label_pattern.finditer(text):
             start = match.end()
             window_text = text[start : start + window]
@@ -680,6 +889,49 @@ def _timestamp_candidates(
                 )
             )
     return tuple(candidates)
+
+
+def _matching_block_indices(
+    texts: tuple[str, ...],
+    needle: str,
+) -> set[int]:
+    folded = needle.casefold()
+    return {
+        index
+        for index, text in enumerate(texts)
+        if folded in text.casefold()
+    }
+
+
+def _innermost_indices(
+    blocks: tuple[Block, ...],
+    matching: set[int],
+) -> list[int]:
+    innermost = set(matching)
+    for index in matching:
+        parent = blocks[index].parent
+        while parent != -1:
+            innermost.discard(parent)
+            parent = blocks[parent].parent
+    return [index for index in range(len(blocks)) if index in innermost]
+
+
+def _closure_region_index(
+    blocks: tuple[Block, ...],
+    texts: tuple[str, ...],
+    matching: set[int],
+    index: int,
+) -> int:
+    current = index
+    while True:
+        parent = blocks[current].parent
+        if parent == -1 or parent not in matching:
+            return current
+        if blocks[parent].tag in ROOT_BLOCK_TAGS:
+            return current
+        if len(texts[parent]) > MAX_CLOSURE_REGION_CHARS:
+            return current
+        current = parent
 
 
 def _link_candidates(
@@ -766,33 +1018,6 @@ def _time_candidates(
             )
         )
     return tuple(candidates)
-
-
-def _innermost_blocks(
-    root: _Element,
-    needle: str,
-    render_cache: dict[int, str],
-) -> list[tuple[_Element, str]]:
-    """Return blocks containing ``needle`` with no matching descendant block."""
-
-    folded = needle.casefold()
-    matching: list[tuple[_Element, str]] = []
-    for element in _iter_elements(root):
-        if element.tag not in BLOCK_ELEMENTS:
-            continue
-        text = _normalize_inline(_render_cached(element, render_cache))
-        if folded in text.casefold():
-            matching.append((element, text))
-
-    matching_ids = {id(element) for element, _ in matching}
-    return [
-        (element, text)
-        for element, text in matching
-        if not any(
-            id(descendant) in matching_ids
-            for descendant in _iter_elements(element)
-        )
-    ]
 
 
 def _iter_elements(element: _Element):
@@ -934,3 +1159,19 @@ def _candidates(
     if not isinstance(values, list):
         raise SnapshotFormatError(f"snapshot.{name} must be a list")
     return tuple(factory(item) for item in values)
+
+
+def _validate_block_links(blocks: tuple[Block, ...]) -> None:
+    """Reject persisted block references that could not come from a page.
+
+    Children must point forward (pre-order allocation) and parents must be
+    earlier blocks, which rules out cycles and out-of-range lookups.
+    """
+
+    total = len(blocks)
+    for index, block in enumerate(blocks):
+        if block.parent != -1 and not 0 <= block.parent < index:
+            raise SnapshotFormatError("block.parent is out of range")
+        for part in block.parts:
+            if isinstance(part, int) and not index < part < total:
+                raise SnapshotFormatError("block.parts index is out of range")

@@ -72,6 +72,7 @@ class FetchSuccessTests(unittest.TestCase):
         self.assertIn("Complet 2026", result.snapshot.text)
         self.assertEqual(result.http_status, 200)
         self.assertEqual(result.etag, '"closed-2026"')
+        self.assertEqual(result.content_type, "text/html")
         self.assertEqual(
             result.last_modified, "Wed, 04 Nov 2026 09:30:00 GMT"
         )
@@ -239,6 +240,26 @@ class FailureTaxonomyTests(unittest.TestCase):
         assert result.failure is not None
         self.assertEqual(result.failure.category, FailureCategory.EMPTY_BODY)
         self.assertIsNone(result.snapshot)
+
+    def test_html_without_usable_structure_is_unparseable_content(self) -> None:
+        for body in (
+            b"<html></html>",
+            b"<html><body></body></html>",
+            b"<html><body>   \n\t </body></html>",
+            b"<html><head><title>titre</title></head></html>",
+        ):
+            with self.subTest(body=body):
+                with LoopbackServer() as server:
+                    server.route("/", respond_html(body))
+                    result = make_fetcher(server.url("/")).fetch()
+
+                self.assertFalse(result.ok)
+                assert result.failure is not None
+                self.assertEqual(
+                    result.failure.category,
+                    FailureCategory.UNPARSEABLE_CONTENT,
+                )
+                self.assertIsNone(result.snapshot)
 
     def test_wrong_content_type_is_rejected(self) -> None:
         with LoopbackServer() as server:

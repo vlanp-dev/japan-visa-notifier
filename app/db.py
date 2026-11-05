@@ -1,16 +1,23 @@
 """SQLite persistence helpers.
 
-The schema is created with ``CREATE ... IF NOT EXISTS`` statements so applying
-it repeatedly is safe.  The foundation only creates structure; seeding default
-rules and writing checks belong to later layers of the work item.
+The detection schema is created with ``CREATE ... IF NOT EXISTS`` statements so
+applying it repeatedly is safe, then versioned through a detection-owned
+migration marker.  This module deliberately never writes ``PRAGMA
+user_version``: a sibling service that shares the database keeps ownership of
+that marker, and this service can neither reset nor misinterpret it.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: Detection-owned migration marker.  It is intentionally separate from
+#: ``PRAGMA user_version`` so two services can share one SQLite file safely.
+MIGRATION_TABLE = "detection_schema_migrations"
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -23,6 +30,7 @@ CREATE TABLE IF NOT EXISTS page_references (
     http_status INTEGER,
     etag TEXT,
     last_modified TEXT,
+    content_type TEXT,
     captured_at TEXT NOT NULL,
     operator_label TEXT NOT NULL,
     previous_reference_id INTEGER REFERENCES page_references(id),
@@ -100,9 +108,34 @@ CREATE TABLE IF NOT EXISTS refreeze_events (
 
 CREATE INDEX IF NOT EXISTS idx_refreeze_events_occurred_at
     ON refreeze_events (occurred_at);
-
-PRAGMA user_version = 1;
 """
+
+
+def _migration_initial(connection: sqlite3.Connection) -> None:
+    """Create the detection tables and indexes."""
+
+    connection.executescript(SCHEMA)
+
+
+def _migration_reference_content_type(connection: sqlite3.Connection) -> None:
+    """Add the reference content type to databases created before version 2."""
+
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(page_references)")
+    }
+    if "content_type" not in columns:
+        connection.execute(
+            "ALTER TABLE page_references ADD COLUMN content_type TEXT"
+        )
+
+
+#: Ordered, idempotent detection migrations.  Each entry is applied once and
+#: recorded in ``MIGRATION_TABLE``.
+_MIGRATIONS = (
+    (1, _migration_initial),
+    (2, _migration_reference_content_type),
+)
 
 
 def connect(database_path: str) -> sqlite3.Connection:
@@ -120,10 +153,31 @@ def connect(database_path: str) -> sqlite3.Connection:
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
-    """Create every table and index if they do not already exist."""
+    """Apply pending detection migrations without touching ``user_version``."""
 
-    connection.executescript(SCHEMA)
-    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {MIGRATION_TABLE} (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    applied = {
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT version FROM {MIGRATION_TABLE}"
+        )
+    }
+    for version, migration in _MIGRATIONS:
+        if version in applied:
+            continue
+        migration(connection)
+        connection.execute(
+            f"INSERT INTO {MIGRATION_TABLE} (version, applied_at) "
+            "VALUES (?, ?)",
+            (version, datetime.now(timezone.utc).isoformat()),
+        )
     connection.commit()
 
 

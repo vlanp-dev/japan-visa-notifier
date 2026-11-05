@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +11,7 @@ from urllib.parse import urlencode
 from app.config import Config
 from app.detection.canonical import canonicalize_page
 from app.detection.fetch import FailureCategory, FetchFailure, FetchResult
+from app.detection.locking import reference_lock
 from app.detection.refreeze import (
     SUCCESS_MESSAGE,
     RefreezeService,
@@ -61,6 +64,7 @@ def seed_for(html: str, *, operator: str = "opérateur initial") -> ReferenceSee
         http_status=200,
         etag='"old"',
         last_modified="Wed, 04 Nov 2026 09:30:00 GMT",
+        content_type="text/html",
     )
 
 
@@ -70,6 +74,7 @@ def success(html: str) -> FetchResult:
         http_status=200,
         etag='"new"',
         last_modified="Thu, 05 Nov 2026 10:00:00 GMT",
+        content_type="text/html",
         final_url=BASE_URL,
     )
 
@@ -102,6 +107,21 @@ class SequenceFetcher:
         index = min(self.calls, len(self._results) - 1)
         self.calls += 1
         return self._results[index]
+
+
+class BlockingFetcher:
+    def __init__(self, result: FetchResult):
+        self.result = result
+        self.calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def fetch(self) -> FetchResult:
+        self.calls += 1
+        self.entered.set()
+        if not self.release.wait(5):
+            raise TimeoutError("test did not release the fetcher")
+        return self.result
 
 
 class RefreezeServiceTestCase(unittest.TestCase):
@@ -141,6 +161,7 @@ class SuccessfulRefreezeTests(RefreezeServiceTestCase):
         self.assertEqual(new.operator_label, "opérateur test")
         self.assertEqual(new.http_status, 200)
         self.assertEqual(new.etag, '"new"')
+        self.assertEqual(new.content_type, "text/html")
         self.assertEqual(
             new.last_modified, "Thu, 05 Nov 2026 10:00:00 GMT"
         )
@@ -359,6 +380,79 @@ class RefreezeAtomicityTests(RefreezeServiceTestCase):
         self.assertEqual(self.store.list_refreeze_events(), [])
 
 
+class RefreezeSerializationTests(RefreezeServiceTestCase):
+    def test_refreeze_waits_for_a_running_check_before_replacing(self) -> None:
+        self.capture_old_reference()
+        blocking = BlockingFetcher(success(variant_html()))
+        check_service = CheckService(
+            self.config, self.store, fetcher=blocking
+        )
+        check_results = []
+
+        def run_check() -> None:
+            check_results.append(check_service.run_once())
+
+        check_thread = threading.Thread(target=run_check)
+        check_thread.start()
+        self.assertTrue(blocking.entered.wait(5))
+
+        refreeze_fetcher = StaticFetcher(success(fixture_html()))
+        refreeze_service = RefreezeService(
+            self.config, self.store, fetcher=refreeze_fetcher
+        )
+        refreeze_results = []
+
+        def run_refreeze() -> None:
+            refreeze_results.append(refreeze_service.refreeze())
+
+        refreeze_thread = threading.Thread(target=run_refreeze)
+        refreeze_thread.start()
+        time.sleep(0.05)
+
+        # The check owns the shared lock, so the refreeze cannot even retrieve.
+        self.assertEqual(refreeze_fetcher.calls, 0)
+
+        blocking.release.set()
+        check_thread.join(5)
+        refreeze_thread.join(5)
+        self.assertFalse(check_thread.is_alive())
+        self.assertFalse(refreeze_thread.is_alive())
+
+        self.assertEqual(check_results[0].outcome, OUTCOME_UNCHANGED)
+        self.assertTrue(refreeze_results[0].success)
+        current = self.store.current_reference()
+        assert current is not None
+        self.assertEqual(
+            current.content_hash, snapshot_of(fixture_html()).digest()
+        )
+        self.assertEqual(len(self.store.list_references()), 2)
+
+    def test_check_is_skipped_while_a_refreeze_holds_the_lock(self) -> None:
+        self.capture_old_reference()
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+
+        def hold_lock() -> None:
+            with reference_lock(self.store.database_path):
+                holder_ready.set()
+                release_holder.wait(5)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        self.assertTrue(holder_ready.wait(5))
+        fetcher = StaticFetcher(success(fixture_html()))
+        try:
+            run = CheckService(
+                self.config, self.store, fetcher=fetcher
+            ).run_once()
+        finally:
+            release_holder.set()
+            holder.join(5)
+
+        self.assertTrue(run.skipped)
+        self.assertEqual(fetcher.calls, 0)
+
+
 class RefreezeWebTestCase(RefreezeServiceTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -406,6 +500,8 @@ class RefreezePageTests(RefreezeWebTestCase):
             self.old.content_hash,
             self.old.captured_at,
             self.old.operator_label,
+            "Type de contenu",
+            "text/html",
             "remplace la référence figée actuelle",
             'name="csrf_token"',
             f'value="{self.token}"',

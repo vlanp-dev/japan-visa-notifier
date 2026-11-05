@@ -11,7 +11,6 @@ manual run can never retrieve the page twice at the same time.
 
 from __future__ import annotations
 
-import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -27,8 +26,15 @@ from .engine import (
     evaluate,
 )
 from .fetch import FailureCategory, FetchFailure, FetchResult, Fetcher
+from .locking import reference_lock
 from .rules import Rule
-from .store import CheckRecord, ReferenceSeed, Store, utc_now_iso
+from .store import (
+    CheckRecord,
+    ReferenceConflictError,
+    ReferenceSeed,
+    Store,
+    utc_now_iso,
+)
 
 OUTCOME_UNCHANGED = "unchanged"
 OUTCOME_CHANGED = "changed"
@@ -39,6 +45,9 @@ OUTCOME_CONTROL_FAILURE = "control_failure"
 OUTCOME_SKIPPED = "skipped"
 
 REASON_REFERENCE_INITIALIZED = "reference_initialized"
+
+#: Internal reason for a cycle abandoned because a refreeze won the race.
+REASON_REFERENCE_CHANGED = "reference_changed"
 
 DEFAULT_FAILURE_MESSAGE = "la page n'a pas pu être récupérée"
 
@@ -97,7 +106,9 @@ class CheckService:
         )
         self._change_sink = change_sink
         self._logger = logger
-        self._run_lock = threading.Lock()
+        # Shared with RefreezeService so a check and a refreeze can never
+        # interleave their reference reads and writes in this process.
+        self._run_lock = reference_lock(self._store.database_path)
         if seed_default_rules:
             inserted = self._store.seed_default_rules()
             if inserted:
@@ -206,6 +217,23 @@ class CheckService:
     ) -> CheckRun:
         snapshot = result.snapshot
         assert snapshot is not None  # guaranteed by run_once
+        if not snapshot.text.strip() or not snapshot.blocks:
+            # Defensive boundary check: a fetcher must never turn an unusable
+            # page into a content change, even if it returns a snapshot.
+            return self._record_control_failure(
+                FetchResult(
+                    failure=FetchFailure(
+                        FailureCategory.UNPARSEABLE_CONTENT,
+                        "le contenu récupéré ne contient aucune structure "
+                        "exploitable",
+                    ),
+                    http_status=result.http_status,
+                    etag=result.etag,
+                    last_modified=result.last_modified,
+                ),
+                started_at,
+                started_monotonic,
+            )
         finished_at = utc_now_iso()
         duration_ms = _duration_ms(started_monotonic)
         rules = self._store.list_rules()
@@ -220,6 +248,8 @@ class CheckService:
                 finished_at,
                 duration_ms,
             )
+        if self._store.current_reference_id() != current.id:
+            return self._skip_reference_changed()
 
         try:
             baseline = current.to_snapshot()
@@ -256,19 +286,25 @@ class CheckService:
             )
 
         outcome = OUTCOME_CHANGED if evaluation.changed else OUTCOME_UNCHANGED
-        check = self._store.record_check(
-            started_at=started_at,
-            finished_at=finished_at,
-            outcome=outcome,
-            reason=None,
-            target_url=self._config.target_url,
-            http_status=result.http_status,
-            etag=result.etag,
-            last_modified=result.last_modified,
-            reference_id=current.id,
-            duration_ms=duration_ms,
-            results=evaluation.results,
-        )
+        if self._store.current_reference_id() != current.id:
+            return self._skip_reference_changed()
+        try:
+            check = self._store.record_check(
+                started_at=started_at,
+                finished_at=finished_at,
+                outcome=outcome,
+                reason=None,
+                target_url=self._config.target_url,
+                http_status=result.http_status,
+                etag=result.etag,
+                last_modified=result.last_modified,
+                reference_id=current.id,
+                duration_ms=duration_ms,
+                results=evaluation.results,
+                expected_reference_id=current.id,
+            )
+        except ReferenceConflictError:
+            return self._skip_reference_changed()
         self._log(
             "check_completed",
             outcome=outcome,
@@ -308,20 +344,27 @@ class CheckService:
             http_status=result.http_status,
             etag=result.etag,
             last_modified=result.last_modified,
+            content_type=result.content_type,
         )
-        check = self._store.record_check(
-            started_at=started_at,
-            finished_at=finished_at,
-            outcome=OUTCOME_UNCHANGED,
-            reason=REASON_REFERENCE_INITIALIZED,
-            target_url=self._config.target_url,
-            http_status=result.http_status,
-            etag=result.etag,
-            last_modified=result.last_modified,
-            duration_ms=duration_ms,
-            results=evaluation.results,
-            new_reference=seed,
-        )
+        try:
+            check = self._store.record_check(
+                started_at=started_at,
+                finished_at=finished_at,
+                outcome=OUTCOME_UNCHANGED,
+                reason=REASON_REFERENCE_INITIALIZED,
+                target_url=self._config.target_url,
+                http_status=result.http_status,
+                etag=result.etag,
+                last_modified=result.last_modified,
+                duration_ms=duration_ms,
+                results=evaluation.results,
+                new_reference=seed,
+                expected_reference_id=None,
+            )
+        except ReferenceConflictError:
+            # Another writer created a reference after we read ``None``.
+            # Never silently supersede an operator-confirmed reference.
+            return self._skip_reference_changed()
         self._log(
             "check_completed",
             outcome=OUTCOME_UNCHANGED,
@@ -336,6 +379,16 @@ class CheckService:
             check_id=check.id,
             reason=REASON_REFERENCE_INITIALIZED,
             results=evaluation.results,
+        )
+
+    def _skip_reference_changed(self) -> CheckRun:
+        """Abandon a cycle whose reference was superseded before commit."""
+
+        self._log("check_skipped", reason=REASON_REFERENCE_CHANGED)
+        return CheckRun(
+            outcome=OUTCOME_SKIPPED,
+            reason=REASON_REFERENCE_CHANGED,
+            skipped=True,
         )
 
     def _emit_change(
@@ -380,5 +433,6 @@ __all__ = [
     "OUTCOME_CONTROL_FAILURE",
     "OUTCOME_SKIPPED",
     "OUTCOME_UNCHANGED",
+    "REASON_REFERENCE_CHANGED",
     "REASON_REFERENCE_INITIALIZED",
 ]

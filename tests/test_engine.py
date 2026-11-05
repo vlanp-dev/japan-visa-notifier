@@ -84,8 +84,11 @@ class BaselineRuleTests(unittest.TestCase):
         self.assertIn("rendez-vous", html.casefold())
         self.assertIn("calendrier", html.casefold())
         changed = html.replace(
-            "La prise de rendez-vous est momentanément fermée.",
-            "La prise de rendez-vous est momentanément fermée. Calendrier.",
+            "</body>",
+            (
+                "<p>Calendrier et rendez-vous : informations générales.</p>"
+                "</body>"
+            ),
         )
 
         evaluation = evaluate(snapshot(html), snapshot(changed), default_rules())
@@ -117,6 +120,28 @@ class ClosureBlockRuleTests(unittest.TestCase):
         result = evaluation.result_for(RULE_ID_CLOSURE_BLOCK)
         self.assertIn("liste d'attente", result.current_excerpt)
         self.assertIn("Complet 2026", result.reference_excerpt)
+
+    def test_explanatory_sentence_change_triggers_the_closure_rule(self) -> None:
+        html = fixture_html()
+        changed = html.replace(
+            "La prise de rendez-vous est momentanément fermée.",
+            "La prise de rendez-vous est désormais ouverte.",
+        )
+
+        evaluation = evaluate(snapshot(html), snapshot(changed), default_rules())
+
+        self.assertTrue(evaluation.changed)
+        self.assertEqual(
+            statuses(evaluation),
+            {
+                RULE_ID_CLOSURE_BLOCK: STATUS_TRIGGERED,
+                RULE_ID_UPDATE_TIMESTAMP: STATUS_NOT_TRIGGERED,
+                RULE_ID_NEW_ELEMENT: STATUS_NOT_TRIGGERED,
+            },
+        )
+        result = evaluation.result_for(RULE_ID_CLOSURE_BLOCK)
+        self.assertIn("désormais ouverte", result.current_excerpt)
+        self.assertIn("momentanément fermée", result.reference_excerpt)
 
     def test_removed_announcement_block_is_reported_as_missing(self) -> None:
         html = fixture_html()

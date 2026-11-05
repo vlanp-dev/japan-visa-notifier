@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.db import SCHEMA_VERSION, connect, initialize_database, initialize_schema
+from app.db import (
+    MIGRATION_TABLE,
+    SCHEMA_VERSION,
+    connect,
+    initialize_database,
+    initialize_schema,
+)
 
 EXPECTED_TABLES = {
     "page_references",
@@ -33,8 +39,73 @@ class DatabaseTests(unittest.TestCase):
         connection = connect(self.database_path)
         try:
             self.assertTrue(EXPECTED_TABLES.issubset(self._tables(connection)))
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, SCHEMA_VERSION)
+            self.assertIn(MIGRATION_TABLE, self._tables(connection))
+            versions = [
+                row[0]
+                for row in connection.execute(
+                    f"SELECT version FROM {MIGRATION_TABLE} ORDER BY version"
+                )
+            ]
+            self.assertEqual(versions[-1], SCHEMA_VERSION)
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(page_references)"
+                )
+            }
+            self.assertIn("content_type", columns)
+        finally:
+            connection.close()
+
+    def test_migration_never_resets_a_foreign_user_version(self) -> None:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            # Simulate a database whose schema is owned by a sibling service
+            # that already uses PRAGMA user_version.
+            connection.executescript(
+                """
+                CREATE TABLE page_references (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_url TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    normalized_snapshot TEXT NOT NULL,
+                    http_status INTEGER,
+                    etag TEXT,
+                    last_modified TEXT,
+                    captured_at TEXT NOT NULL,
+                    operator_label TEXT NOT NULL,
+                    previous_reference_id INTEGER,
+                    is_current INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 42;
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        initialize_database(self.database_path)
+        connection = connect(self.database_path)
+        try:
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], 42
+            )
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(page_references)"
+                )
+            }
+            self.assertIn("content_type", columns)
+            versions = [
+                row[0]
+                for row in connection.execute(
+                    f"SELECT version FROM {MIGRATION_TABLE} ORDER BY version"
+                )
+            ]
+            self.assertEqual(versions[-1], SCHEMA_VERSION)
         finally:
             connection.close()
 

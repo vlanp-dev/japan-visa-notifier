@@ -99,7 +99,7 @@ class CanonicalizationTests(unittest.TestCase):
         self.assertNotIn("\u00a0", snapshot.text)
         self.assertNotIn("\t", snapshot.text)
 
-    def test_closure_candidate_is_the_nearest_block(self) -> None:
+    def test_closure_region_is_the_bounded_announcement_container(self) -> None:
         html = """
         <div class="outer">
           <p>Annonce</p>
@@ -112,7 +112,30 @@ class CanonicalizationTests(unittest.TestCase):
         self.assertEqual(len(snapshot.closure_blocks), 1)
         candidate = snapshot.closure_blocks[0]
         self.assertEqual(candidate.tag, "div")
-        self.assertEqual(candidate.excerpt, "Complet 2026")
+        self.assertIn("Complet 2026", candidate.excerpt)
+        self.assertIn("Autre information", candidate.excerpt)
+
+    def test_closure_region_includes_the_explanatory_sentence(self) -> None:
+        snapshot = canonicalize_page(
+            load_fixture("closed_page.html"), base_url=BASE_URL
+        )
+
+        self.assertEqual(len(snapshot.closure_blocks), 1)
+        excerpt = snapshot.closure_blocks[0].excerpt
+        self.assertIn("Complet 2026", excerpt)
+        self.assertIn("momentanément fermée", excerpt)
+
+    def test_page_without_usable_text_is_rejected(self) -> None:
+        for body in (
+            "<html></html>",
+            "<html><body></body></html>",
+            "<html><body>   \n\t </body></html>",
+            "<html><head><title>titre seul</title></head></html>",
+            "texte brut sans structure",
+        ):
+            with self.subTest(body=body):
+                with self.assertRaises(CanonicalizationError):
+                    canonicalize_page(body)
 
     def test_closure_anchor_is_configurable_and_absence_yields_no_candidate(
         self,

@@ -386,32 +386,34 @@ def _closure_hits(
     anchor: str,
     excerpt_limit: int,
 ) -> list[tuple[str, str]]:
-    """Return ``(fingerprint, excerpt)`` for blocks containing ``anchor``.
+    """Return ``(fingerprint, excerpt)`` for announcement regions.
 
-    The canonicalizer already extracted closure candidates for its configured
-    anchor, so those are preferred.  When an operator configures a different
-    anchor, the visible text blocks are used as a deterministic fallback.
+    The region is re-extracted from the parameter-independent block tree for
+    *both* the reference and the current snapshot using the rule's current
+    anchor.  Editing a rule therefore takes effect on the next check without
+    refreezing the reference.
     """
 
-    folded = anchor.casefold()
     hits: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    for block in snapshot.closure_blocks:
-        if folded not in block.excerpt.casefold():
+    for candidate in snapshot.extract_closure_candidates(
+        anchor, excerpt_limit=excerpt_limit
+    ):
+        if candidate.fingerprint in seen:
             continue
-        if block.fingerprint in seen:
-            continue
-        seen.add(block.fingerprint)
+        seen.add(candidate.fingerprint)
         hits.append(
             (
-                block.fingerprint,
-                single_line_excerpt(block.excerpt, excerpt_limit),
+                candidate.fingerprint,
+                single_line_excerpt(candidate.excerpt, excerpt_limit),
             )
         )
-    if hits:
+    if hits or snapshot.blocks:
         return hits
 
+    # Compatibility fallback for a legacy snapshot with no block tree.
+    folded = anchor.casefold()
     for line in snapshot.text.splitlines():
         normalized = line.strip()
         if not normalized or folded not in normalized.casefold():
@@ -435,15 +437,18 @@ def _timestamp_hits(
     window: int,
     excerpt_limit: int,
 ) -> list[tuple[str, str]]:
-    """Return ``(fingerprint, excerpt)`` for timestamps next to ``label``."""
+    """Return ``(fingerprint, excerpt)`` for timestamps next to ``label``.
 
-    folded = label.casefold()
+    Both snapshots are re-extracted with the rule's current label and window,
+    so a narrowed or widened window is honoured immediately.
+    """
+
     hits: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    for candidate in snapshot.timestamps:
-        if candidate.label.casefold() != folded:
-            continue
+    for candidate in snapshot.extract_timestamp_candidates(
+        label, window, excerpt_limit=excerpt_limit
+    ):
         if candidate.fingerprint in seen:
             continue
         seen.add(candidate.fingerprint)
@@ -453,12 +458,11 @@ def _timestamp_hits(
                 single_line_excerpt(candidate.excerpt, excerpt_limit),
             )
         )
-    if hits:
+    if hits or snapshot.blocks:
         return hits
 
-    # A rule may use a label or window different from the canonicalizer's
-    # configuration.  Fall back to the canonical visible text so operator edits
-    # remain effective.
+    # Compatibility fallback for a legacy snapshot with no block tree.
+    folded = label.casefold()
     for line in snapshot.text.splitlines():
         lowered = line.casefold()
         start = lowered.find(folded)
@@ -479,8 +483,6 @@ def _timestamp_hits(
                         )
             start = lowered.find(folded, start + 1)
         if hits:
-            # One displayed timestamp per label occurrence is enough; keep
-            # scanning other lines only if none was found yet.
             break
     return hits
 
