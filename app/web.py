@@ -231,6 +231,7 @@ class Application:
 def status_line(status: int) -> str:
     reasons = {
         200: "OK",
+        303: "See Other",
         400: "Bad Request",
         403: "Forbidden",
         404: "Not Found",
