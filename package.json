@@ -1,0 +1,14 @@
+{
+  "name": "ambassade-alerts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Service d'alerte des pages d'ambassade, avec notification par email via Resend.",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js"
+  }
+}
