@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from .util import mask_sms, redact_mapping, redact_url
+from .util import mask_sms, redact_mapping, redact_url, sanitize_error
 
 DEFAULT_CONFIG_PATH = "config/app.json"
 ENV_PREFIX = "ALERTS__"
@@ -173,6 +173,7 @@ class Config:
     email: EmailConfig = field(default_factory=EmailConfig)
     source_path: str | None = None
     sms: SmsConfig = field(default_factory=SmsConfig)
+    sms_configuration_error: str | None = None
 
     @property
     def email_configured(self) -> bool:
@@ -180,7 +181,7 @@ class Config:
 
     @property
     def sms_configured(self) -> bool:
-        return self.sms.configured
+        return self.sms.configured and self.sms_configuration_error is None
 
     @property
     def secure_cookies(self) -> bool:
@@ -301,7 +302,6 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
     database = _section(document, "database")
     logging_section = _section(document, "logging")
     email_section = _section(document, "email")
-    sms_section = _section(document, "sms")
 
     service_name = _as_text(
         service.get("name", "Alertes épisodes"), "service.name", max_length=100
@@ -337,7 +337,7 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
         raise ConfigError("server.secret must contain at least 16 characters")
 
     email = _build_email(email_section)
-    sms = _build_sms(sms_section)
+    sms, sms_configuration_error = _build_optional_sms(document)
 
     return Config(
         service_name=service_name,
@@ -352,6 +352,7 @@ def _build_config(document: dict[str, Any], source_path: str | None) -> Config:
         base_url_configured=bool(service.get("base_url")),
         email=email,
         sms=sms,
+        sms_configuration_error=sms_configuration_error,
         source_path=source_path,
     )
 
@@ -434,6 +435,23 @@ def _build_email(section: Mapping[str, Any]) -> EmailConfig:
         timeout_seconds=timeout_seconds,
         outbox_path=outbox_path,
     )
+
+
+def _build_optional_sms(
+    document: Mapping[str, Any],
+) -> tuple[SmsConfig, str | None]:
+    """Build the optional SMS configuration without making it fatal.
+
+    The SMS channel is optional: a malformed, partial or invalid ``sms``
+    section must never prevent the mandatory email channel from starting.
+    The reason is retained on the configuration so the channel can be shown as
+    explicitly inactive instead of failing silently.
+    """
+
+    try:
+        return _build_sms(_section(document, "sms")), None
+    except ConfigError as exc:
+        return SmsConfig(), sanitize_error(exc) or "Configuration SMS invalide."
 
 
 def _build_sms(section: Mapping[str, Any]) -> SmsConfig:
@@ -562,6 +580,8 @@ def _build_sms(section: Mapping[str, Any]) -> SmsConfig:
 
 
 def _validate_http_url(value: str, name: str) -> None:
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise ConfigError(f"{name} must not contain control characters")
     try:
         parsed = urlsplit(value)
     except ValueError as exc:

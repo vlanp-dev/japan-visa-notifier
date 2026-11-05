@@ -79,9 +79,11 @@ Deux fournisseurs sont possibles via `email.provider` :
 - `outbox` : écrit chaque message en `.eml` dans `outbox_path` et exige
   `outbox_path`, `sender` et `recipient`.
 
-Si la section `email` est incomplète, le service démarre quand même : le tableau de bord
-indique « Non configuré » et chaque création d'épisode enregistre une tentative
-email en échec explicite. Une panne d'envoi n'empêche ni l'acquittement ni la
+Si la section `email` est absente ou vide, le service démarre quand même : le
+tableau de bord indique « Non configuré » et chaque création d'épisode
+enregistre une tentative email en échec explicite. Une section partiellement
+renseignée est en revanche refusée au démarrage afin de ne pas masquer une
+configuration incomplète. Une panne d'envoi n'empêche ni l'acquittement ni la
 réémission de l'épisode. Le mot de passe n'est jamais affiché par la
 configuration masquée ni journalisé.
 
@@ -100,10 +102,12 @@ gratuit ne demande qu'une modification de configuration, sans toucher à la
 logique d'épisode ni de détection. Le fournisseur doit exposer une API HTTP
 JSON acceptant le destinataire et le message.
 
-Une section `sms` absente ou vide (`"sms": {}`) laisse le canal inactif. Si la
-section est renseignée, les clés `provider`, `url`, `sender`, `recipient` et
-`credential` sont obligatoires ensemble ; une section partielle est refusée au
-démarrage. Les autres clés sont :
+Une section `sms` absente ou vide (`"sms": {}`) laisse le canal inactif. Une
+section renseignée mais partielle, mal formée ou invalide ne bloque jamais le
+démarrage : le canal reste inactif, la raison est affichée dans l'interface et
+le service continue normalement en email seul. Pour activer le canal, les clés
+`provider`, `url`, `sender`, `recipient` et `credential` doivent être
+renseignées ensemble. Les autres clés sont :
 
 - `method` : `POST` (par défaut), `PUT` ou `PATCH` ;
 - `auth_mode` : `bearer` (par défaut), `header` ou `query` ;

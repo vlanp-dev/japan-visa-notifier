@@ -226,6 +226,7 @@ class ConfigLoadingTests(unittest.TestCase):
         config = write_config(self.directory, document)
 
         self.assertTrue(config.sms_configured)
+        self.assertIsNone(config.sms_configuration_error)
         self.assertEqual(config.sms.method, "POST")
         self.assertEqual(config.sms.auth_mode, "bearer")
         self.assertEqual(config.sms.timeout_seconds, 5.0)
@@ -279,7 +280,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(config.redacted()["sms"]["recipient"], "***78")
         self.assertIn("?***", config.redacted()["sms"]["url"])
 
-    def test_partial_or_invalid_sms_configuration_is_rejected(self) -> None:
+    def test_partial_or_invalid_sms_configuration_is_non_fatal(self) -> None:
         cases = [
             {"provider": "free-sms"},
             {
@@ -336,11 +337,35 @@ class ConfigLoadingTests(unittest.TestCase):
                 "credential": "x",
                 "timeout_seconds": 0,
             },
+            {
+                "provider": "free-sms",
+                "url": "https://sms.example.org/\nsend",
+                "sender": "Alertes",
+                "recipient": "+33612345678",
+                "credential": "x",
+            },
+            "not-an-object",
         ]
         for sms in cases:
             with self.subTest(sms=sms):
-                with self.assertRaises(ConfigError):
-                    write_config(self.directory, config_document(sms=sms))
+                config = write_config(self.directory, config_document(sms=sms))
+
+                self.assertFalse(config.sms_configured)
+                self.assertFalse(config.sms.configured)
+                self.assertIsNotNone(config.sms_configuration_error)
+                self.assertFalse(config.redacted()["sms"]["configured"])
+
+    def test_partial_sms_environment_override_is_non_fatal(self) -> None:
+        path = self.directory / "empty.json"
+        path.write_text("{}", encoding="utf-8")
+
+        config = load_config(
+            path=path, environ={"ALERTS__SMS__PROVIDER": "free-sms"}
+        )
+
+        self.assertFalse(config.sms_configured)
+        self.assertIsNotNone(config.sms_configuration_error)
+        self.assertEqual(config.sms.provider, "")
 
     def test_with_overrides_validates_values(self) -> None:
         document = config_document()

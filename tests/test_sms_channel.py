@@ -121,6 +121,35 @@ class SmsChannelServiceTests(unittest.TestCase):
         self.assertEqual(attempts[0].status, "failed")
         self.assertEqual(service.status().state, SMS_STATE_UNCONFIGURED)
 
+    def test_status_is_read_only_and_does_not_persist_a_fingerprint(self) -> None:
+        service = self._service(self._config(SMS_SETTINGS), FakeSmsProvider())
+
+        self.assertIsNone(self.states.get())
+
+        status = service.status()
+
+        self.assertEqual(status.state, SMS_STATE_UNVERIFIED)
+        self.assertIsNone(self.states.get())
+        self.assertEqual(service.status().state, SMS_STATE_UNVERIFIED)
+
+    def test_invalid_sms_section_is_inactive_with_a_reason(self) -> None:
+        config = self._config({"provider": "free-test"})
+        service = SmsChannelService(
+            config,
+            self.deliveries,
+            self.states,
+            logger=null_logger(),
+            clock=self.clock,
+        )
+
+        status = service.status()
+
+        self.assertEqual(status.state, SMS_STATE_UNCONFIGURED)
+        self.assertFalse(status.active)
+        self.assertIsNotNone(status.configuration_error)
+        self.assertEqual(status.configuration_error, config.sms_configuration_error)
+        self.assertIsNone(service.provider)
+
     def test_invalid_configuration_is_refused_without_a_provider_call(self) -> None:
         config = self._config(SMS_SETTINGS)
         config = replace(config, sms=replace(config.sms, method="DELETE"))

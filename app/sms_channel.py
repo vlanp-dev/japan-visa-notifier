@@ -192,23 +192,25 @@ class SmsChannelService:
     def status(self) -> SmsChannelStatus:
         """Derive the explicit state from configuration and persisted state.
 
-        Calling this method also persists the fingerprint. A configuration
-        change therefore invalidates the previous verification even before the
-        next test or alert is attempted.
+        This is a read-only view: rendering the dashboard never creates or
+        resets the persisted fingerprint. A configuration change still
+        invalidates the previous verification because the stored fingerprint
+        no longer matches, and persistence happens only when a test or a real
+        alert attempt is recorded.
         """
 
         sms = self.config.sms
         fingerprint = sms_config_fingerprint(sms)
         configuration_error = self._configuration_error()
         row: SmsChannelState | None = None
-        if sms.configured and self._provider_error is None:
-            row = self.states.ensure(fingerprint)
+        if configuration_error is None:
+            row = self.states.get()
+            if row is not None and row.fingerprint != fingerprint:
+                row = None
 
         if configuration_error is not None:
             state = SMS_STATE_UNCONFIGURED
-        elif row is None or row.fingerprint != fingerprint:
-            state = SMS_STATE_UNVERIFIED
-        elif row.verified_at is None:
+        elif row is None or row.verified_at is None:
             state = SMS_STATE_UNVERIFIED
         elif row.failing_since is not None:
             state = SMS_STATE_FAILING
@@ -432,6 +434,11 @@ class SmsChannelService:
             )
 
     def _configuration_error(self) -> str | None:
+        if self.config.sms_configuration_error:
+            return (
+                sanitize_error(self.config.sms_configuration_error)
+                or INVALID_CONFIGURATION_ERROR
+            )
         if self._provider_error is not None:
             return self._provider_error
         if not self.config.sms.configured:

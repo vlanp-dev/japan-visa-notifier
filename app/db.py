@@ -15,6 +15,53 @@ from typing import Iterator
 
 SCHEMA_VERSION = 2
 
+# Columns the repositories rely on. ``CREATE TABLE IF NOT EXISTS`` does not
+# migrate a database created by an older shape, so the health check verifies
+# the columns instead of trusting ``PRAGMA user_version`` alone.
+_REQUIRED_COLUMNS = {
+    "episodes": frozenset(
+        {
+            "id",
+            "change_nature",
+            "page_url",
+            "summary",
+            "detected_at",
+            "acknowledged_at",
+            "created_at",
+        }
+    ),
+    "delivery_attempts": frozenset(
+        {
+            "id",
+            "episode_id",
+            "channel",
+            "kind",
+            "provider",
+            "recipient_masked",
+            "status",
+            "segment_count",
+            "duration_ms",
+            "error",
+            "created_at",
+        }
+    ),
+    "sms_channel_state": frozenset(
+        {
+            "id",
+            "fingerprint",
+            "verified_at",
+            "failing_since",
+            "last_test_at",
+            "last_test_status",
+            "last_test_error",
+            "last_alert_at",
+            "last_alert_status",
+            "last_alert_error",
+            "updated_at",
+        }
+    ),
+}
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
@@ -88,12 +135,23 @@ class Database:
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def check(self) -> bool:
-        """Return True when the database is reachable and initialized."""
+        """Return True when the database is reachable and schema-complete."""
 
         with self.connection() as connection:
             connection.execute("SELECT 1").fetchone()
             row = connection.execute("PRAGMA user_version").fetchone()
-        return bool(row and int(row[0]) >= SCHEMA_VERSION)
+            if not row or int(row[0]) < SCHEMA_VERSION:
+                return False
+            for table, required in _REQUIRED_COLUMNS.items():
+                present = {
+                    str(column["name"])
+                    for column in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+                if not required.issubset(present):
+                    return False
+        return True
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

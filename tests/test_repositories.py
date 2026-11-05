@@ -36,6 +36,22 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("delivery_attempts", tables)
         self.assertIn("sms_channel_state", tables)
 
+    def test_health_check_rejects_an_incompatible_legacy_schema(self) -> None:
+        path = Path(self._temp.name) / "legacy.sqlite3"
+        with sqlite3.connect(path) as connection:
+            connection.execute("PRAGMA user_version = 2")
+            connection.execute("CREATE TABLE episodes (id TEXT PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE delivery_attempts (id TEXT PRIMARY KEY)"
+            )
+            connection.execute(
+                "CREATE TABLE sms_channel_state (id INTEGER PRIMARY KEY)"
+            )
+
+        legacy = Database(str(path))
+
+        self.assertFalse(legacy.check())
+
     def test_create_get_list_and_acknowledge_episode(self) -> None:
         moment = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
         episode = self.episodes.create(

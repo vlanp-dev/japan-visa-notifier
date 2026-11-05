@@ -85,7 +85,7 @@ class SmsAcceptanceTests(unittest.TestCase):
         self.database_path = self.root / "alerts.sqlite3"
         self.clock = lambda: datetime(2026, 2, 1, tzinfo=timezone.utc)
 
-    def _config(self, *, sms: dict | None = None, name: str = "config"):
+    def _config(self, *, sms: object | None = None, name: str = "config"):
         directory = self.root / name
         directory.mkdir(parents=True, exist_ok=True)
         document = config_document(
@@ -103,7 +103,7 @@ class SmsAcceptanceTests(unittest.TestCase):
             database={"path": str(self.database_path)},
         )
         if sms is not None:
-            document["sms"] = dict(sms)
+            document["sms"] = sms
         return write_config(directory, document)
 
     def _build(self, config, provider: FakeSmsAdapter):
@@ -166,6 +166,39 @@ class SmsAcceptanceTests(unittest.TestCase):
         self.assertEqual(provider.calls, [])
         self.assertEqual(self._outbox_count(), 1)
         self.assertIn("Inactif — non configuré", client.get("/").text)
+
+    def test_partial_or_malformed_sms_configuration_keeps_service_running(
+        self,
+    ) -> None:
+        cases = {
+            "partial": {"provider": "free-test"},
+            "malformed": "not-an-object",
+        }
+        for name, sms in cases.items():
+            with self.subTest(name=name):
+                provider = FakeSmsAdapter("unused")
+                config = self._config(
+                    sms=sms, name=f"invalid-sms-{name}"
+                )
+
+                self.assertIsNotNone(config.sms_configuration_error)
+                self.assertFalse(config.sms_configured)
+
+                app, client = self._build(config, provider)
+                response = client.get("/")
+                self.assertEqual(response.status, 200)
+                self.assertIn("Inactif — non configuré", response.text)
+
+                episode_id = self._create_episode(app, client)
+                attempts = app.deliveries.list_for_episode(episode_id)
+                self.assertEqual(
+                    [
+                        (attempt.channel, attempt.kind, attempt.status)
+                        for attempt in attempts
+                    ],
+                    [("email", "alert", "sent")],
+                )
+                self.assertEqual(provider.calls, [])
 
     def test_configured_but_unverified_channel_stays_silent(self) -> None:
         provider = FakeSmsAdapter("free-test")

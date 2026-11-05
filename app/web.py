@@ -30,6 +30,7 @@ from .repositories import (
     SmsChannelStateRepository,
 )
 from .sms_channel import (
+    SMS_STATE_UNCONFIGURED,
     SmsChannelService,
     SmsChannelStatus,
     UNSET as SMS_UNSET,
@@ -296,7 +297,16 @@ class Application:
             return self.sms.status()
         except Exception:
             self._logger.exception("Cannot read SMS channel status")
-            return None
+            return SmsChannelStatus(
+                state=SMS_STATE_UNCONFIGURED,
+                configured=False,
+                provider="",
+                recipient_masked="",
+                fingerprint="",
+                configuration_error=(
+                    "Impossible de lire l'état du canal SMS."
+                ),
+            )
 
     def _health_json(self, request: Request) -> Response:
         database_ok = self._database_ok()
