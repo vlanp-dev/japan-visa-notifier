@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from .config import Config, load_config
 from .db import connect, initialize_database
 from .logging_setup import StructuredLogger
+from .runtime import Runtime
 from .security import CsrfMiddleware, SecurityHeadersMiddleware
 from .web import (
     Application,
@@ -85,6 +86,7 @@ def main() -> int:
     config = load_config()
     logger = StructuredLogger()
     application = create_app(config, logger)
+    runtime = Runtime.create(config, logger)
 
     logger.log(
         "service_start",
@@ -92,11 +94,13 @@ def main() -> int:
         port=config.port,
         interval_seconds=config.interval_seconds,
     )
+    runtime.start()
     try:
         with make_server(config.host, config.port, application) as server:
             server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        runtime.stop()
         logger.log("service_stop")
     return 0
